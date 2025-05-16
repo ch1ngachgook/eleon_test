@@ -10,17 +10,18 @@ import DoorControlButton from './controls/door-control-button';
 import ChannelSwitch from './controls/channel-switch';
 import SensorDisplay from './controls/sensor-display';
 import {
-  ProtoLightStates,
-  ProtoDoorLockStates,
-  ProtoChannelStates,
-  ProtoCommandStates,
+  LighStates,
+  DoorLockStates,
+  ChannelStates,
+  States, // Renamed from ProtoCommandStates
+  Statuses,
 } from '@/types/protobuf';
 import { Thermometer, Droplets, Gauge, Wifi, WifiOff, ZapOff, Network, Fingerprint, KeyRound, Bluetooth as BluetoothIcon, AlertCircle, Loader2, ShieldAlert } from 'lucide-react';
-import { toast } from '@/hooks/use-toast'; // Added toast import
+import { toast } from '@/hooks/use-toast';
 
 interface RoomStatusPanelProps {
   roomId: string;
-  authToken: string | null; // Added authToken prop
+  authToken: string | null;
 }
 
 const ConnectionStatusIndicator: React.FC<{ status: ConnectionStatus, errorMsg?: string | null }> = ({ status, errorMsg }) => {
@@ -29,22 +30,15 @@ const ConnectionStatusIndicator: React.FC<{ status: ConnectionStatus, errorMsg?:
   let color = "text-red-500";
 
   switch (status) {
-    case 'connecting_tcp':
-    case 'connecting_ble':
-    case 'authenticating_ble':
+    case 'connecting': // Generic connecting state
       Icon = Loader2;
       text = "Connecting...";
       color = "text-yellow-500 animate-spin";
       break;
-    case 'connected_tcp':
-      Icon = Wifi;
-      text = "Connected (TCP)";
+    case 'connected': // Generic connected state
+      Icon = Wifi; // Assuming TCP is the primary successful connection
+      text = "Connected";
       color = "text-green-500";
-      break;
-    case 'connected_ble':
-      Icon = BluetoothIcon;
-      text = "Connected (BLE)";
-      color = "text-blue-500";
       break;
     case 'error':
       Icon = ZapOff;
@@ -71,27 +65,26 @@ export default function RoomStatusPanel({ roomId, authToken }: RoomStatusPanelPr
     connect,
     disconnect,
     sendCommand,
-  } = useRoomController(roomId, authToken); // Pass authToken to the hook
+  } = useRoomController(roomId, authToken);
 
   const handleLightToggle = (isOn: boolean) => {
-    sendCommand(isOn ? ProtoCommandStates.LightOn : ProtoCommandStates.LightOff);
+    sendCommand(isOn ? States.LightOn : States.LightOff);
   };
 
   const handleDoorToggle = () => {
-    // Corrected logic: if current state is Close, send Open command, and vice-versa.
-    sendCommand(hardwareState.door_lock === ProtoDoorLockStates.Close ? ProtoCommandStates.DoorLockOpen : ProtoCommandStates.DoorLockClose);
+    sendCommand(hardwareState.door_lock === DoorLockStates.Close ? States.DoorLockOpen : States.DoorLockClose);
   };
 
   const handleChannel1Toggle = (isOn: boolean) => {
-    sendCommand(isOn ? ProtoCommandStates.Channel1On : ProtoCommandStates.Channel1Off);
+    sendCommand(isOn ? States.Channel1On : States.Channel1Off);
   };
 
   const handleChannel2Toggle = (isOn: boolean) => {
-    sendCommand(isOn ? ProtoCommandStates.Channel2On : ProtoCommandStates.Channel2Off);
+    sendCommand(isOn ? States.Channel2On : States.Channel2Off);
   };
   
-  const isEffectivelyConnected = connectionStatus === 'connected_tcp' || connectionStatus === 'connected_ble';
-  const isConnecting = connectionStatus === 'connecting_tcp' || connectionStatus === 'connecting_ble' || connectionStatus === 'authenticating_ble';
+  const isEffectivelyConnected = connectionStatus === 'connected';
+  const isConnecting = connectionStatus === 'connecting';
 
   if (!authToken) {
     return (
@@ -131,10 +124,10 @@ export default function RoomStatusPanel({ roomId, authToken }: RoomStatusPanelPr
         </div>
       </CardHeader>
       <CardContent className="space-y-6">
-        {(!isEffectivelyConnected && connectionStatus !== 'connecting_tcp' && connectionStatus !== 'connecting_ble' && connectionStatus !== 'authenticating_ble') || (connectionStatus === 'error' && error?.type !== 'command') ? (
+        {(!isEffectivelyConnected && !isConnecting) || (connectionStatus === 'error' && error?.type !== 'command_error') ? (
           <div className="text-center space-y-3">
-            <p className={error ? "text-destructive" : ""}>
-              {error && error.type !== 'command' ? error.message : `Нет подключения к контроллеру комнаты ${roomId}.`}
+            <p className={error && error.type !== 'command_error' ? "text-destructive" : ""}>
+              {error && error.type !== 'command_error' ? error.message : `Нет подключения к контроллеру комнаты ${roomId}.`}
             </p>
             <Button onClick={connect} disabled={isConnecting || !authToken}>
               {isConnecting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
@@ -149,7 +142,7 @@ export default function RoomStatusPanel({ roomId, authToken }: RoomStatusPanelPr
             </div>
         ) : (
           <>
-            {error && error.type === 'command' && ( // Only show command errors here, connection errors handled above
+            {error && error.type === 'command_error' && (
               <Alert variant="destructive" className="my-2">
                 <AlertCircle className="h-4 w-4" />
                 <AlertTitle>Ошибка команды</AlertTitle>
@@ -176,7 +169,7 @@ export default function RoomStatusPanel({ roomId, authToken }: RoomStatusPanelPr
                     <LightToggle
                         id={`controller-light-${roomId}`}
                         label="Свет"
-                        isOn={hardwareState.light_on === ProtoLightStates.On}
+                        isOn={hardwareState.light_on === LighStates.On}
                         onToggle={handleLightToggle}
                         isLoading={isSendingCommand} 
                         disabled={!isEffectivelyConnected || isSendingCommand}
@@ -184,7 +177,7 @@ export default function RoomStatusPanel({ roomId, authToken }: RoomStatusPanelPr
                     <ChannelSwitch
                         id={`controller-channel1-${roomId}`}
                         label="Канал 1"
-                        isOn={hardwareState.channel_1 === ProtoChannelStates.ChannelOn}
+                        isOn={hardwareState.channel_1 === ChannelStates.ChannelOn}
                         onToggle={handleChannel1Toggle}
                         isLoading={isSendingCommand} 
                         disabled={!isEffectivelyConnected || isSendingCommand}
@@ -192,19 +185,19 @@ export default function RoomStatusPanel({ roomId, authToken }: RoomStatusPanelPr
                     <ChannelSwitch
                         id={`controller-channel2-${roomId}`}
                         label="Канал 2"
-                        isOn={hardwareState.channel_2 === ProtoChannelStates.ChannelOn}
+                        isOn={hardwareState.channel_2 === ChannelStates.ChannelOn}
                         onToggle={handleChannel2Toggle}
                         isLoading={isSendingCommand}
                         disabled={!isEffectivelyConnected || isSendingCommand}
                     />
                      <DoorControlButton
-                        isLocked={hardwareState.door_lock === ProtoDoorLockStates.Close}
+                        isLocked={hardwareState.door_lock === DoorLockStates.Close}
                         onToggle={handleDoorToggle}
                         isLoading={isSendingCommand}
                         disabled={!isEffectivelyConnected || isSendingCommand}
                     />
                     <p className="text-xs text-muted-foreground text-center">
-                        Дверь: {hardwareState.door_lock === ProtoDoorLockStates.Close ? 'Закрыта' : 'Открыта'}
+                        Дверь: {hardwareState.door_lock === DoorLockStates.Close ? 'Закрыта' : 'Открыта'}
                     </p>
                 </div>
                 <div className="space-y-4">
@@ -245,3 +238,4 @@ export default function RoomStatusPanel({ roomId, authToken }: RoomStatusPanelPr
     </Card>
   );
 }
+
