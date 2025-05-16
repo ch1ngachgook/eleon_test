@@ -16,8 +16,21 @@ const nextConfig: NextConfig = {
         port: '',
         pathname: '/**',
       },
+      {
+        protocol: 'https',
+        hostname: 'i.pravatar.cc',
+        port: '',
+        pathname: '/**',
+      }
     ],
   },
+  // If you were to use a PWA plugin like `next-pwa`:
+  // pwa: {
+  //   dest: 'public',
+  //   register: true,
+  //   skipWaiting: true,
+  //   disable: process.env.NODE_ENV === 'development',
+  // },
 };
 
 export default nextConfig;
