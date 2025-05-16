@@ -1,0 +1,78 @@
+syntax = "proto3";
+option go_package = "./;api";
+
+enum Statuses {
+    Ok = 0;
+    Error = 1;
+}
+
+enum LighStates { // Note: Standard Naming convention would be LightStates
+    On = 0;
+    Off = 1;
+}
+
+enum DoorLockStates {
+    Open = 0;
+    Close = 1;
+}
+
+enum ChannelStates {
+    ChannelOn = 0;
+    ChannelOff = 1;
+}
+
+enum States { // Represents command states for SetState
+    LightOn = 0;
+    LightOff = 1;
+    DoorLockOpen = 2;
+    DoorLockClose = 3;
+    Channel1On = 4;
+    Channel1Off = 5;
+    Channel2On = 6;
+    Channel2Off = 7;
+}
+
+message IdentifyRequest { // This message is defined but not directly used in ClientMessage oneof
+    string Token = 1;
+}
+
+message GetState {}
+
+message GetInfo {}
+
+message SetState {
+    States state = 1;
+}
+
+message State { // Represents the actual hardware state
+    LighStates light_on = 1;
+    DoorLockStates door_lock = 2;
+    ChannelStates channel_1 = 3;
+    ChannelStates channel_2 = 4;
+    float temperature = 5;
+    float pressure = 6;
+    float humidity = 7;
+}
+
+message Info {
+    string ip = 1;
+    string mac = 2;
+    string ble_name = 3;
+    string token = 4; // This is the controller's internal token/identifier
+}
+
+message ClientMessage { // Sent from Bridge to TCP Controller
+    oneof message {
+        GetInfo get_info = 1;
+        SetState set_state = 2; // Note: Original proto had set_state as field 2, get_state as 3. User bridge.js uses this order.
+        GetState get_state = 3;
+    }
+}
+
+message ControllerResponse { // Sent from TCP Controller to Bridge
+    oneof response {
+        Info info = 1;
+        State state = 2;
+        Statuses status = 3;
+    }
+}

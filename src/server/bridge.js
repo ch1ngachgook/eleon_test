@@ -1,145 +1,183 @@
 
 require('dotenv').config({ path: require('path').resolve(process.cwd(), '.env') });
 const WebSocket = require('ws');
-const net = require('net');
+const net       = require('net');
+const path      = require('path');
+const protobuf  = require('protobufjs');
 
-const CONTROLLER_IP = process.env.CONTROLLER_IP || '192.168.1.100';
-const CONTROLLER_PORT = parseInt(process.env.CONTROLLER_PORT || '7000', 10);
+const CONTROLLER_IP         = process.env.CONTROLLER_IP         || '192.168.1.100';
+const CONTROLLER_PORT       = parseInt(process.env.CONTROLLER_PORT       || '7000', 10);
 const BRIDGE_WEBSOCKET_PORT = parseInt(process.env.BRIDGE_WEBSOCKET_PORT || '8080', 10);
+const TCP_TIMEOUT_MS        = parseInt(process.env.TCP_TIMEOUT_MS || '5000', 10);
 
-const wss = new WebSocket.Server({ port: BRIDGE_WEBSOCKET_PORT });
+// Загружаем .proto
+// __dirname is src/server, so ../../file.proto refers to project_root/file.proto
+const protoPath = path.resolve(__dirname, '../../file.proto'); 
+let ClientMessage, ControllerResponse;
+
+try {
+    const root = protobuf.loadSync(protoPath);
+    ClientMessage      = root.lookupType('ClientMessage');
+    ControllerResponse = root.lookupType('ControllerResponse');
+    console.log('Protobuf definitions loaded successfully.');
+} catch (err) {
+    console.error('Failed to load Protobuf definitions:', err);
+    process.exit(1); // Exit if .proto file cannot be loaded
+}
+
 
 console.log(`WebSocket Bridge server started on ws://localhost:${BRIDGE_WEBSOCKET_PORT}`);
 console.log(`Attempting to connect to controller at ${CONTROLLER_IP}:${CONTROLLER_PORT}`);
 
-wss.on('connection', (ws) => {
-    console.log('Frontend client connected to WebSocket bridge');
-    let tcpClient = null;
-    let KEEPALIVE_INTERVAL = 30000; // 30 seconds
-    let keepAliveIntervalId = null;
+const wss = new WebSocket.Server({ port: BRIDGE_WEBSOCKET_PORT });
 
-    function connectToTcpController() {
-        if (tcpClient && !tcpClient.destroyed) {
-            console.log('TCP connection already active or connecting.');
-            return tcpClient;
+function oneShotProtobuf(payloadFromFrontend, callback) {
+  // payloadFromFrontend is the entire JSON object from the WebSocket message.
+  // We need payloadFromFrontend.message for the protobuf ClientMessage part.
+  const clientMessageProtoPayload = payloadFromFrontend.message;
+
+  if (!clientMessageProtoPayload || typeof clientMessageProtoPayload !== 'object') {
+    return callback(new Error('Invalid or missing "message" field in payload for Protobuf.'));
+  }
+
+  const oneofFieldName = Object.keys(clientMessageProtoPayload)[0];
+  const oneofFieldValue = Object.values(clientMessageProtoPayload)[0];
+
+  if (!oneofFieldName || (typeof oneofFieldValue !== 'object' && oneofFieldValue !== undefined /* for empty messages like GetInfo */)) {
+      return callback(new Error(`Invalid "message" content: ${JSON.stringify(clientMessageProtoPayload)}`));
+  }
+  
+  // Create Protobuf message
+  let errMsg;
+  try {
+    errMsg = ClientMessage.verify({ [oneofFieldName]: oneofFieldValue });
+  } catch (e) {
+    return callback(new Error(`Protobuf verification error for ${oneofFieldName}: ${e.message}`));
+  }
+  if (errMsg) {
+      return callback(new Error(`Protobuf verification failed for ${oneofFieldName}: ${errMsg}`));
+  }
+
+  const clientMessageInstance = ClientMessage.create({ [oneofFieldName]: oneofFieldValue });
+  const msgBytes = ClientMessage.encode(clientMessageInstance).finish();
+  
+  // Prefix with length
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32BE(msgBytes.length, 0);
+  const packet = Buffer.concat([lenBuf, msgBytes]);
+
+  console.log(`[Bridge] Sending to TCP ${CONTROLLER_IP}:${CONTROLLER_PORT}: Length=${msgBytes.length}, OneofField=${oneofFieldName}, Value=${JSON.stringify(oneofFieldValue)}`);
+
+  const tcp = new net.Socket();
+  let responded = false, buffer = Buffer.alloc(0), expectedLen = null;
+
+  tcp.setTimeout(TCP_TIMEOUT_MS, () => {
+    if (!responded) {
+      console.error('[Bridge] TCP timeout occurred.');
+      callback(new Error('TCP timeout with controller'));
+      tcp.destroy();
+      responded = true; // Ensure callback is only called once
+    }
+  });
+
+  tcp.connect(CONTROLLER_PORT, CONTROLLER_IP, () => {
+    console.log('[Bridge] TCP connected. Writing packet.');
+    tcp.write(packet);
+  });
+
+  tcp.on('data', (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    console.log(`[Bridge] TCP data received, buffer length: ${buffer.length}`);
+    if (expectedLen === null && buffer.length >= 4) {
+      expectedLen = buffer.readUInt32BE(0);
+      console.log(`[Bridge] Expected TCP response length: ${expectedLen}`);
+    }
+    if (expectedLen !== null && buffer.length >= 4 + expectedLen) {
+      const msgBuf = buffer.slice(4, 4 + expectedLen);
+      try {
+        const resp   = ControllerResponse.decode(msgBuf);
+        console.log('[Bridge] TCP response decoded:', JSON.stringify(resp.toJSON()));
+        if (!responded) {
+            responded = true;
+            callback(null, resp.toJSON()); // Convert to plain JS object for JSON stringification
         }
+      } catch (e) {
+          console.error('[Bridge] Error decoding TCP response:', e);
+          if (!responded) {
+            responded = true;
+            callback(new Error(`Protobuf decode error: ${e.message}`));
+          }
+      }
+      tcp.destroy();
+    } else if (expectedLen !== null && buffer.length < 4 + expectedLen) {
+        console.log(`[Bridge] TCP data chunk received, waiting for more. Buffer: ${buffer.length}, Expected: ${4+expectedLen}`);
+    }
+  });
 
-        const client = new net.Socket();
-        client.setTimeout(5000); // 5 seconds timeout for connection
+  tcp.on('error', (err) => {
+    console.error('[Bridge] TCP connection error:', err.message);
+    if (!responded) {
+      responded = true;
+      callback(err);
+    }
+    tcp.destroy();
+  });
 
-        client.connect(CONTROLLER_PORT, CONTROLLER_IP, () => {
-            console.log(`Connected to TCP controller: ${CONTROLLER_IP}:${CONTROLLER_PORT}`);
-            tcpClient = client;
-            ws.send(JSON.stringify({ type: 'bridge_status', message: 'Connected to TCP controller' }));
-            
-            // Start sending keep-alive messages if controller requires them
-            // Example: send a newline or a specific keep-alive command
-            if (keepAliveIntervalId) clearInterval(keepAliveIntervalId);
-            keepAliveIntervalId = setInterval(() => {
-                if (tcpClient && !tcpClient.destroyed && tcpClient.writable) {
-                    // Adjust this to what your controller expects as a keep-alive
-                    // For example, some devices expect a newline regularly
-                    // tcpClient.write('\n'); 
-                    // console.log('Sent TCP keep-alive');
-                }
-            }, KEEPALIVE_INTERVAL);
-        });
+  tcp.on('close', () => {
+      console.log('[Bridge] TCP connection closed.');
+      if(!responded){ // If connection closed before any response or error
+          // callback(new Error('TCP connection closed unexpectedly by controller.'));
+          // Responded might already be true if timeout or other error occurred.
+      }
+  });
+}
 
-        client.on('data', (data) => {
-            const response = data.toString();
-            console.log(`Received from TCP controller: ${response}`);
-            try {
-                // Attempt to parse as JSON, if not, send as raw string
-                const jsonData = JSON.parse(response);
-                ws.send(JSON.stringify(jsonData));
-            } catch (e) {
-                ws.send(JSON.stringify({ type: 'raw_data', data: response }));
-            }
-        });
+wss.on('connection', (ws) => {
+  console.log('[Bridge] Frontend client connected via WebSocket.');
+  ws.on('message', (msg) => {
+    let payloadFromFrontend;
+    const messageString = msg.toString();
+    console.log(`[Bridge] Received from frontend (raw): ${messageString}`);
 
-        client.on('close', () => {
-            console.log('TCP connection closed');
-            if (keepAliveIntervalId) clearInterval(keepAliveIntervalId);
-            keepAliveIntervalId = null;
-            tcpClient = null;
-            if (ws.readyState === WebSocket.OPEN) {
-                 ws.send(JSON.stringify({ type: 'bridge_status', message: 'TCP connection closed. Attempting to reconnect...' }));
-            }
-            // Optional: auto-reconnect logic for TCP
-            // setTimeout(connectToTcpController, 5000); 
-        });
+    try { 
+      payloadFromFrontend = JSON.parse(messageString); 
+    }
+    catch (e) { 
+      console.error('[Bridge] Invalid JSON from frontend:', e.message);
+      return ws.send(JSON.stringify({ error: 'Invalid JSON' })); 
+    }
 
-        client.on('error', (err) => {
-            console.error(`TCP connection error: ${err.message}`);
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'bridge_error', message: `TCP Error: ${err.message}` }));
-            }
-            if (tcpClient) tcpClient.destroy();
-            tcpClient = null;
-             if (keepAliveIntervalId) clearInterval(keepAliveIntervalId);
-            keepAliveIntervalId = null;
-        });
-        
-        client.on('timeout', () => {
-            console.error('TCP connection timeout.');
-            if (ws.readyState === WebSocket.OPEN) {
-                 ws.send(JSON.stringify({ type: 'bridge_error', message: 'TCP connection timeout.' }));
-            }
-            if (tcpClient) client.destroy();
-            tcpClient = null;
-            if (keepAliveIntervalId) clearInterval(keepAliveIntervalId);
-            keepAliveIntervalId = null;
-        });
-        return client;
+    // Basic validation of the payload structure expected by the bridge
+    if (!payloadFromFrontend.message || typeof payloadFromFrontend.message !== 'object') {
+      console.error('[Bridge] Missing or invalid "message" field in frontend payload.');
+      return ws.send(JSON.stringify({ error: 'Invalid payload: Missing or malformed "message" field' }));
     }
     
-    // Initial connection attempt
-    tcpClient = connectToTcpController();
+    // Here you could add JWT validation for payloadFromFrontend.auth_token
+    // For now, we just log it if present
+    if (payloadFromFrontend.auth_token) {
+        console.log(`[Bridge] Received auth_token: ${payloadFromFrontend.auth_token}, room_id: ${payloadFromFrontend.room_id || 'N/A'}`);
+    }
 
-    ws.on('message', (message) => {
-        const messageString = message.toString();
-        console.log(`Received from frontend: ${messageString}`);
 
-        if (!tcpClient || tcpClient.destroyed) {
-            console.log('TCP client not connected. Attempting to reconnect...');
-            ws.send(JSON.stringify({ type: 'bridge_status', message: 'TCP client not connected. Reconnecting...' }));
-            tcpClient = connectToTcpController(); // Attempt to reconnect
-            // Defer sending message until TCP is connected, or queue it
-            // For simplicity, we'll just notify and the user might need to retry
-            if (!tcpClient || tcpClient.destroyed) {
-                 ws.send(JSON.stringify({ type: 'bridge_error', message: 'Failed to connect to TCP controller. Please try again.' }));
-                 return;
-            }
-        }
-        
-        // Assuming the message from frontend is a JSON string that the TCP controller understands
-        // or that the bridge doesn't need to transform.
-        // For protobuf, this part would need to serialize the JSON to a protobuf binary.
-        // For now, sending as string.
-        if (tcpClient && !tcpClient.destroyed && tcpClient.writable) {
-            tcpClient.write(messageString + '\\n'); // Append newline if controller expects line-terminated commands
-            console.log(`Sent to TCP controller: ${messageString}`);
-        } else {
-             console.log('Cannot send message, TCP client not writable.');
-             if(ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'bridge_error', message: 'Cannot send command: TCP client not ready.' }));
-             }
-        }
+    oneShotProtobuf(payloadFromFrontend, (err, resp) => {
+      if (err) {
+        console.error('[Bridge] Error in oneShotProtobuf:', err.message);
+        ws.send(JSON.stringify({ error: err.message }));
+      } else {
+        console.log('[Bridge] Sending response to frontend:', JSON.stringify({ data: resp }));
+        ws.send(JSON.stringify({ data: resp }));
+      }
     });
+  });
 
-    ws.on('close', () => {
-        console.log('Frontend client disconnected from WebSocket bridge');
-        if (tcpClient && !tcpClient.destroyed) {
-            tcpClient.destroy();
-            console.log('TCP connection closed due to WebSocket client disconnect.');
-        }
-        if (keepAliveIntervalId) clearInterval(keepAliveIntervalId);
-    });
+  ws.on('close', () => {
+    console.log('[Bridge] Frontend client disconnected.');
+  });
 
-    ws.on('error', (err) => {
-        console.error(`WebSocket error for a client: ${err.message}`);
-        // TCP client cleanup is handled by ws.on('close') if that also triggers
-    });
+  ws.on('error', (err) => {
+      console.error('[Bridge] WebSocket error for a client:', err.message);
+  });
 });
 
-console.log('Bridge setup complete.');
+console.log('[Bridge] Setup complete. Waiting for WebSocket connections.');

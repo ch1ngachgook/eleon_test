@@ -1,28 +1,28 @@
 
-// Based on the provided .proto file
+// Based on the provided file.proto
 
-export enum ProtoStatuses {
+export enum Statuses {
   Ok = 0,
   Error = 1,
 }
 
-export enum ProtoLightStates {
+export enum LighStates { // Note: Standard Naming convention would be LightStates
   On = 0,
   Off = 1,
 }
 
-export enum ProtoDoorLockStates {
+export enum DoorLockStates {
   Open = 0,
   Close = 1,
 }
 
-export enum ProtoChannelStates {
+export enum ChannelStates {
   ChannelOn = 0,
   ChannelOff = 1,
 }
 
-// Command states for set_state
-export enum ProtoCommandStates {
+// This enum defines the 'state' for the SetState message
+export enum States {
   LightOn = 0,
   LightOff = 1,
   DoorLockOpen = 2,
@@ -33,62 +33,60 @@ export enum ProtoCommandStates {
   Channel2Off = 7,
 }
 
-// IdentifyRequest is not used with top-level auth_token in ClientMessage
-// export interface ProtoIdentifyRequest {
-//   Token: string; 
-// }
-
-export interface ProtoGetStateRequest {}
-
-export interface ProtoGetInfoRequest {}
-
-export interface ProtoSetStateRequest {
-  state: ProtoCommandStates;
+// Message Definitions for Request Payloads (used inside ClientMessage oneof)
+export interface GetInfoRequest {} // Empty message
+export interface GetStateRequest {} // Empty message
+export interface SetStateRequest {
+  state: States; // Uses the States enum
 }
 
-export interface ProtoStateResponse {
-  light_on: ProtoLightStates;
-  door_lock: ProtoDoorLockStates;
-  channel_1: ProtoChannelStates;
-  channel_2: ProtoChannelStates;
+// This is the actual structure of the ClientMessage Protobuf
+// The frontend will construct a JSON object where the 'message' field contains one of these.
+export type ClientMessageOneofPayload =
+  | { get_info: GetInfoRequest }
+  | { set_state: SetStateRequest }
+  | { get_state: GetStateRequest };
+
+export interface ProtoClientMessage { // Represents the Protobuf ClientMessage
+  message: ClientMessageOneofPayload;
+}
+
+
+// Message Definitions for Response Payloads (used inside ControllerResponse oneof)
+export interface InfoResponse {
+  ip: string;
+  mac: string;
+  ble_name: string;
+  token: string; // Controller's internal token
+}
+
+export interface StateResponse {
+  light_on: LighStates;
+  door_lock: DoorLockStates;
+  channel_1: ChannelStates;
+  channel_2: ChannelStates;
   temperature: number;
   pressure: number;
   humidity: number;
 }
 
-export interface ProtoInfoResponse {
-  ip: string;
-  mac: string;
-  ble_name: string;
-  token: string; // This is the controller's internal token/identifier, not the auth_token
+export type ControllerResponseOneofPayload =
+  | { info: InfoResponse }
+  | { state: StateResponse }
+  | { status: Statuses };
+
+export interface ProtoControllerResponse { // Represents the Protobuf ControllerResponse
+  response: ControllerResponseOneofPayload;
 }
 
-// ClientMessage (Request)
-export type ProtoClientMessagePayload =
-  | { get_info: ProtoGetInfoRequest } // field 3
-  | { get_state: ProtoGetStateRequest } // field 4
-  | { set_state: ProtoSetStateRequest }; // field 5
+// Helper type for what the frontend receives from the bridge (after JSON parsing)
+export type BridgeResponse = 
+  | { data: ProtoControllerResponse } 
+  | { error: string };
 
-// Base fields for ClientMessage
-export interface ClientMessageBase {
-  auth_token: string | null; // Field 1
-  room_id: string | null;    // Field 2 (Using string to match JS roomId type, .proto has int32)
+// Type for the JSON payload frontend sends to the bridge
+export interface FrontendWebsocketMessage {
+    auth_token: string | null;
+    room_id: string | null;
+    message: ClientMessageOneofPayload;
 }
-
-export interface ProtoClientMessage extends ClientMessageBase {
-  message: ProtoClientMessagePayload; // Oneof starting from field 3
-}
-
-
-// ControllerResponse
-export type ProtoControllerResponsePayload =
-  | { info: ProtoInfoResponse }
-  | { state: ProtoStateResponse }
-  | { status: ProtoStatuses };
-
-export interface ProtoControllerResponse {
-  response: ProtoControllerResponsePayload;
-}
-
-
-    
