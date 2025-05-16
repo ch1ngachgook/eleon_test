@@ -2,16 +2,18 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type {
-  ProtoInfoResponse,
-  ProtoStateResponse,
-  ProtoCommandStates,
-  ProtoClientMessage,
-  ProtoControllerResponse,
-  ProtoStatuses,
+import {
   ProtoLightStates,
   ProtoDoorLockStates,
   ProtoChannelStates,
+  ProtoCommandStates,
+  ProtoStatuses,
+} from '@/types/protobuf';
+import type {
+  ProtoInfoResponse,
+  ProtoStateResponse,
+  ProtoClientMessage,
+  ProtoControllerResponse,
 } from '@/types/protobuf';
 import * as BleService from '@/lib/ble-service';
 import { toast } from '@/hooks/use-toast';
@@ -108,7 +110,7 @@ export function useRoomController(roomId: string) {
       }
     }
     setIsSendingCommand(false);
-  }, []);
+  }, [sendTcpMessage]); // Added sendTcpMessage to dependency array
   
   const sendTcpMessage = useCallback((message: ProtoClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -118,9 +120,9 @@ export function useRoomController(roomId: string) {
       setError({ message: 'TCP connection not open.', type: 'tcp' });
       setIsSendingCommand(false);
       // Attempt BLE fallback or reconnect? For now, just error.
-      if (connectionStatus === 'connected_tcp') connect(); // try reconnect
+      // if (connectionStatus === 'connected_tcp') connect(); // try reconnect // Removed connect from here
     }
-  }, [connectionStatus]);
+  }, [connectionStatus]); // Removed connect from dependency array to avoid potential loops
 
 
   const connectTcp = useCallback(() => {
@@ -145,7 +147,7 @@ export function useRoomController(roomId: string) {
             mockResponse = { response: { info: { ip: CONTROLLER_IP, mac: "00:1A:2B:3C:4D:5E", ble_name: `HotelKeyRoom-${roomId}`, token: `TOKEN_FOR_${roomId}` }}};
           } else if ('get_state' in clientMsg.message) {
             // Return current mock state, potentially with slight random variations for demo
-            const s = { ...hardwareState, temperature: Math.floor(Math.random() * 5) + 20 };
+            const s = { ...hardwareState, temperature: Math.floor(Math.random() * 5) + 20, humidity: Math.floor(Math.random() * 10) + 40, pressure: Math.floor(Math.random() * 20) + 1000 };
             mockResponse = { response: { state: s }};
           } else if ('set_state' in clientMsg.message) {
              // Simulate command success and update mock state
@@ -161,7 +163,7 @@ export function useRoomController(roomId: string) {
                 case ProtoCommandStates.Channel2On: newHardwareState.channel_2 = ProtoChannelStates.ChannelOn; break;
                 case ProtoCommandStates.Channel2Off: newHardwareState.channel_2 = ProtoChannelStates.ChannelOff; break;
             }
-            setHardwareState(newHardwareState); // Optimistic update for demo
+            // setHardwareState(newHardwareState); // Optimistic update for demo, actual update via get_state
             mockResponse = { response: { status: ProtoStatuses.Ok }};
           } else {
             mockResponse = { response: { status: ProtoStatuses.Error }};
@@ -199,33 +201,35 @@ export function useRoomController(roomId: string) {
 
     wsRef.current.onerror = (event) => {
       console.error('[ControllerHook] WebSocket Error (Simulated):', event);
-      setError({ message: 'TCP connection error.', type: 'tcp' });
+      setError({ message: 'TCP connection error. Controller might be offline.', type: 'tcp' });
       setConnectionStatus('error');
-      if (deviceInfo?.ble_name && deviceInfo?.token) { // If we have info, try BLE
-         // connectBle(deviceInfo.ble_name, deviceInfo.token); // TODO: Implement full BLE path if desired for assignment. For now, TCP error state is enough.
-      }
+      // If we have BLE info, we could attempt BLE connection here.
+      // if (deviceInfo?.ble_name && deviceInfo?.token) {
+      //   connectBle(deviceInfo.ble_name, deviceInfo.token);
+      // }
     };
 
     wsRef.current.onclose = () => {
       console.log('[ControllerHook] WebSocket Disconnected (Simulated)');
-      if (connectionStatus !== 'error' && connectionStatus !== 'disconnected') { // Avoid loop if already errored / manually disconnected
-        // setConnectionStatus('disconnected'); // Or 'error' if unexpected
+      if (connectionStatus !== 'error' && connectionStatus !== 'disconnected') { 
+         // Only set to 'disconnected' if not already in an error state or intentionally disconnected
+         // setConnectionStatus('disconnected'); // This might cause UI flicker if error state is more appropriate
       }
       if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
     };
     
     // Simulate connection success for mock WebSocket
     setTimeout(() => {
-       if (wsRef.current && wsRef.current.onopen) {
+       if (wsRef.current && wsRef.current.onopen && wsRef.current.readyState === WebSocket.CONNECTING) {
          wsRef.current.readyState = WebSocket.OPEN;
          (wsRef.current.onopen as Function)({} as Event);
        }
     }, 1000);
 
 
-  }, [roomId, disconnectAll, handleWebSocketMessage, sendTcpMessage, deviceInfo]); // Added deviceInfo
+  }, [roomId, disconnectAll, handleWebSocketMessage, sendTcpMessage, deviceInfo, hardwareState, connectionStatus]);
 
-  // BLE connection and communication (Simplified Simulation)
+
   const connectBle = useCallback(async (bleName: string, token: string) => {
     if (!navigator.bluetooth) {
       setError({ message: 'Web Bluetooth not supported.', type: 'ble' });
@@ -249,30 +253,28 @@ export function useRoomController(roomId: string) {
       bleCharacteristicRef.current = await service.getCharacteristic(BLE_CHARACTERISTIC_UUID);
       
       setConnectionStatus('authenticating_ble');
-      // Simulate sending token
-      // const tokenData = serializeClientMessage({ message: { identify: { Token: token } } }); // This needs a proto definition if used.
-      // For now, just a placeholder for token auth step.
-      const mockTokenAuthPayload = new TextEncoder().encode(`AUTH:${token}`);
+      const mockTokenAuthPayload = new TextEncoder().encode(`AUTH:${token}`); // Simulate token auth
       await bleCharacteristicRef.current.writeValue(mockTokenAuthPayload.buffer);
       console.log("[ControllerHook] Sent BLE auth token (simulated)");
 
-      // Assume auth success
+      // Simulate auth success after a delay
+      await new Promise(resolve => setTimeout(resolve, 500));
+
       setConnectionStatus('connected_ble');
       toast({ title: 'BLE Connected', description: `Authenticated with ${bleName}.`});
 
-      // Start BLE polling for state
-      sendBleMessage({ message: { get_info: {} } }); // Get initial info over BLE if needed
+      sendBleMessage({ message: { get_info: {} } });
       if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
       stateUpdateIntervalRef.current = setInterval(() => {
         sendBleMessage({ message: { get_state: {} } });
-      }, 8000); // Poll BLE every 8 seconds
+      }, 8000);
 
     } catch (e: any) {
       console.error('[ControllerHook] BLE Error:', e);
       setError({ message: e.message || 'BLE connection failed.', type: 'ble' });
       setConnectionStatus('error');
     }
-  }, [roomId, disconnectAll]);
+  }, [roomId, disconnectAll, sendBleMessage]); // Added sendBleMessage to dependencies
 
   const sendBleMessage = useCallback(async (message: ProtoClientMessage) => {
     if (!bleCharacteristicRef.current || connectionStatus !== 'connected_ble') {
@@ -287,23 +289,22 @@ export function useRoomController(roomId: string) {
       await bleCharacteristicRef.current.writeValue(payload);
       console.log('[ControllerHook] Sent BLE message (simulated):', message);
 
-      // Simulate receiving response over BLE (no real notifications in this mock hook)
-      // For 'set_state', we expect a status. For 'get_state', a state response.
+      // Simulate receiving response over BLE
       setTimeout(() => {
         let mockResponse: ProtoControllerResponse;
         if ('get_state' in message.message) {
-          mockResponse = { response: { state: { ...hardwareState, temperature: Math.floor(Math.random() * 3) + 19 } } }; // slightly different data for demo
+          const s = { ...hardwareState, temperature: Math.floor(Math.random() * 3) + 19, humidity: Math.floor(Math.random() * 8) + 38, pressure: Math.floor(Math.random() * 15) + 995 };
+          mockResponse = { response: { state: s } };
           setHardwareState(mockResponse.response.state);
         } else if ('set_state' in message.message) {
-          // Update mock hardware state based on command
-           const cmd = (message.message.set_state as { state: ProtoCommandStates }).state;
-            let newHardwareState = { ...hardwareState };
-            // (Logic similar to TCP's set_state simulation)
-            setHardwareState(newHardwareState);
+          const cmd = (message.message.set_state as { state: ProtoCommandStates }).state;
+          // let newHardwareState = { ...hardwareState }; // Actual update will come from next get_state
+          // Update logic as in TCP for optimistic UI or rely on get_state
           mockResponse = { response: { status: ProtoStatuses.Ok } };
           toast({ title: 'Command Success (BLE)' });
+          sendBleMessage({ message: { get_state: {} } }); // Request fresh state
         } else if ('get_info' in message.message) {
-           mockResponse = { response: { info: deviceInfo || { ip: 'N/A (BLE)', mac: 'N/A (BLE)', ble_name: bleDeviceRef.current?.name || `HotelKeyRoom-${roomId}`, token: 'N/A (BLE)' } }};
+           mockResponse = { response: { info: deviceInfo || { ip: 'N/A (BLE)', mac: 'N/A (BLE)', ble_name: bleDeviceRef.current?.name || `HotelKeyRoom-${roomId}`, token: 'N/A (BLE_TOKEN)' } }};
            if (!deviceInfo) setDeviceInfo(mockResponse.response.info);
         }
         else {
@@ -320,28 +321,25 @@ export function useRoomController(roomId: string) {
     }
   }, [hardwareState, connectionStatus, deviceInfo, roomId]);
 
+
   const connect = useCallback(() => {
-    // Prioritize TCP, then BLE as fallback if deviceInfo is available
-    // For this simulation, we'll always start with TCP attempt.
-    // If TCP fails and we got ble_name and token, then connectBle could be called.
-    // However, the prompt implies BLE scan by name if TCP fails generally.
-    // For simplicity, this simulation will primarily use TCP. BLE path is sketched.
+    // Try TCP first. If TCP fails and we have BLE info, try BLE.
+    // This logic is simplified: try TCP. If error, user can choose BLE if available.
+    // The UI should ideally offer a choice or smart fallback.
     connectTcp();
-    // Example of how BLE fallback could be initiated if TCP fails AND we have info:
-    // if (error && error.type === 'tcp' && deviceInfo?.ble_name && deviceInfo?.token) {
-    //   connectBle(deviceInfo.ble_name, deviceInfo.token);
-    // }
-  }, [connectTcp, deviceInfo]); // Removed connectBle from deps to avoid loops for now
+    // Consider adding logic here: if connectTcp sets error quickly, and bleInfo exists, try connectBle.
+    // For now, keeping it simple: user manually retries or chooses.
+  }, [connectTcp]);
+
 
   useEffect(() => {
-    // connect(); // Initial connection attempt
     return () => {
       disconnectAll();
       if (stateUpdateIntervalRef.current) {
         clearInterval(stateUpdateIntervalRef.current);
       }
     };
-  }, [disconnectAll]); // Removed connect to prevent auto-connect on every render, let UI trigger it
+  }, [disconnectAll]);
 
   const sendCommand = useCallback((commandState: ProtoCommandStates) => {
     setError(null);
@@ -362,9 +360,10 @@ export function useRoomController(roomId: string) {
     connectionStatus,
     error,
     isSendingCommand,
-    connect, // Expose connect to be called by UI
+    connect,
     disconnect: disconnectAll,
     sendCommand,
+    // Expose BLE connect separately if UI needs explicit BLE trigger
+    // connectBle: (name: string, token: string) => connectBle(name, token) // if needed
   };
 }
-
