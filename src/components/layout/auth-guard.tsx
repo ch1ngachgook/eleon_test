@@ -1,6 +1,7 @@
+
 'use client';
 
-import { useEffect, type ReactNode } from 'react';
+import React, { useEffect, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { useHotelStore } from '@/store/useStore';
 import { Skeleton } from '@/components/ui/skeleton';
