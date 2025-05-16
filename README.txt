@@ -4,7 +4,7 @@ This project is a Next.js application for managing hotel room bookings and inter
 
 ## Project Structure
 
-eleon_test01/
+HotelKey/ (Project Root)
 ├── .env                       # Environment variables (controller IP, ports)
 ├── file.proto                 # Protobuf definitions for controller communication
 ├── package.json               # Project dependencies and scripts
@@ -27,7 +27,7 @@ eleon_test01/
 │   ├── lib/                   # Utility functions, etc.
 │   ├── server/
 │   │   └── bridge.js          # Node.js WebSocket-to-TCP bridge server
-│   ├── store/                 # Zustand stores (useStore.ts for hotel, controllerStore.ts)
+│   ├── store/                 # Zustand stores (useStore.ts for hotel, controllerStore.ts for direct UI)
 │   └── types/                 # TypeScript type definitions (hotel.ts, protobuf.ts)
 └── public/                    # Static assets (icons, manifest.json)
 
@@ -42,11 +42,11 @@ eleon_test01/
 1.  **Clone the Repository (if applicable)**:
     ```bash
     # git clone <repository_url>
-    # cd eleon_test01
+    # cd HotelKey 
     ```
 
 2.  **Install Dependencies**:
-    Navigate to the project root directory (`eleon_test01/`) in your terminal and run:
+    Navigate to the project root directory (`HotelKey/`) in your terminal and run:
     ```bash
     npm install
     ```
@@ -57,7 +57,7 @@ eleon_test01/
     This will install all frontend dependencies specified in `package.json` and backend dependencies for the bridge (`ws`, `dotenv`, `protobufjs`).
 
 3.  **Configure Environment Variables**:
-    Create a file named `.env` in the project root directory (`eleon_test01/`).
+    Create a file named `.env` in the project root directory (`HotelKey/`).
     Copy the following content into it and **modify the values** to match your environment:
 
     ```env
@@ -73,7 +73,7 @@ eleon_test01/
     *   `CONTROLLER_IP`: The IP address of your hardware controller.
     *   `CONTROLLER_PORT`: The TCP port your hardware controller listens on.
     *   `BRIDGE_WEBSOCKET_PORT`: The port the Node.js bridge server will use for WebSocket connections from the frontend.
-    *   `TCP_TIMEOUT_MS`: Timeout in milliseconds for TCP connection attempts to the controller.
+    *   `TCP_TIMEOUT_MS`: Timeout in milliseconds for TCP connection attempts to the controller (used by `bridge.js`).
     *   `NEXT_PUBLIC_BRIDGE_HOST` and `NEXT_PUBLIC_BRIDGE_PORT`: If your Next.js dev server (e.g., `localhost:9002`) is different from where the bridge will run (e.g., `localhost:8080`), you might need these for the frontend to correctly connect to the bridge. If they are the same host and the bridge runs on port 8080, the defaults in `use-room-controller.ts` should work.
 
 4.  **Verify `file.proto`**:
@@ -85,7 +85,7 @@ You need to run two separate processes: the **Backend Bridge Server** and the **
 
 ### Step 1: Start the Backend Bridge Server
 
-1.  Open a terminal in the project root directory (`eleon_test01/`).
+1.  Open a terminal in the project root directory (`HotelKey/`).
 2.  Run the following command:
     ```bash
     npm run bridge
@@ -105,7 +105,7 @@ You need to run two separate processes: the **Backend Bridge Server** and the **
 
 ### Step 2: Start the Frontend Application
 
-1.  Open a **new** terminal window in the project root directory (`eleon_test01/`).
+1.  Open a **new** terminal window in the project root directory (`HotelKey/`).
 2.  Run the following command:
     ```bash
     npm run dev
@@ -137,7 +137,7 @@ You need to run two separate processes: the **Backend Bridge Server** and the **
         *   Attempt to establish a WebSocket connection to the bridge server (`ws://localhost:8080`).
         *   The `useRoomController` hook will use the `authToken` (from `useHotelStore`) and `roomId` (from the URL) for communications.
         *   Upon successful connection, it will send a `get_info` command to the controller via the bridge.
-    *   **Controller Information**: If `get_info` is successful, the IP, MAC, BLE Name, and Token of the controller (as returned by the controller itself) will be displayed.
+    *   **Controller Information**: If `get_info` is successful, the IP, MAC, BLE Name, and Token of the controller (as returned by the controller itself) will be displayed. Example: IP: `192.168.1.100`, MAC: `FE:E8:C0:D4:57:14`, BLE Name: `ROOM_7`, Token: `CM6wqJB5blIMvBKQ`.
     *   **Room State**: The panel will periodically request and display the current state of the room (light, door, channels, sensors).
     *   **Controls**: Use the switches and buttons (Light, Door, Channel 1, Channel 2) to send `set_state` commands to the controller.
     *   **Status & Errors**:
@@ -155,9 +155,9 @@ You need to run two separate processes: the **Backend Bridge Server** and the **
 *   **Frontend cannot connect to bridge**:
     *   Verify the bridge is running and listening on the correct port (e.g., `ws://localhost:8080`).
     *   Check browser console (F12) for WebSocket connection errors.
-    *   Ensure `BRIDGE_WEBSOCKET_PORT` in `.env` matches the port the bridge is using AND the port the frontend tries to connect to (defaults to 8080 in `use-room-controller.ts`).
+    *   Ensure `BRIDGE_WEBSOCKET_PORT` in `.env` matches the port the bridge is using AND the port the frontend tries to connect to (defaults to 8080 in `use-room-controller.ts` or configurable via `NEXT_PUBLIC_BRIDGE_PORT`).
 *   **No data from controller / Commands don't work**:
-    *   Check the bridge terminal logs. It shows messages sent to and received from the TCP controller.
+    *   Check the bridge terminal logs. It shows messages sent to and received from the TCP controller, including Protobuf encoding/decoding steps.
     *   Verify `CONTROLLER_IP` and `CONTROLLER_PORT` in `.env` are correct and the controller is reachable from where the bridge is running.
     *   Ensure the controller is powered on and functioning.
     *   The controller must respond with length-prefixed Protobuf messages as expected by `bridge.js`.

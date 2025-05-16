@@ -6,7 +6,7 @@ enum Statuses {
     Error = 1;
 }
 
-enum LighStates { // Note: Standard Naming convention would be LightStates
+enum LighStates {
     On = 0;
     Off = 1;
 }
@@ -21,7 +21,7 @@ enum ChannelStates {
     ChannelOff = 1;
 }
 
-enum States { // Represents command states for SetState
+enum States {
     LightOn = 0;
     LightOff = 1;
     DoorLockOpen = 2;
@@ -32,7 +32,7 @@ enum States { // Represents command states for SetState
     Channel2Off = 7;
 }
 
-message IdentifyRequest { // This message is defined but not directly used in ClientMessage oneof
+message IdentifyRequest {
     string Token = 1;
 }
 
@@ -44,7 +44,7 @@ message SetState {
     States state = 1;
 }
 
-message State { // Represents the actual hardware state
+message State {
     LighStates light_on = 1;
     DoorLockStates door_lock = 2;
     ChannelStates channel_1 = 3;
@@ -58,18 +58,18 @@ message Info {
     string ip = 1;
     string mac = 2;
     string ble_name = 3;
-    string token = 4; // This is the controller's internal token/identifier
+    string token = 4; // Controller's internal token
 }
 
-message ClientMessage { // Sent from Bridge to TCP Controller
+message ClientMessage {
     oneof message {
         GetInfo get_info = 1;
-        SetState set_state = 2; // Note: Original proto had set_state as field 2, get_state as 3. User bridge.js uses this order.
+        SetState set_state = 2;
         GetState get_state = 3;
     }
 }
 
-message ControllerResponse { // Sent from TCP Controller to Bridge
+message ControllerResponse {
     oneof response {
         Info info = 1;
         State state = 2;

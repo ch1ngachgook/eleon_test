@@ -8,7 +8,7 @@ const protobuf  = require('protobufjs');
 const CONTROLLER_IP         = process.env.CONTROLLER_IP         || '192.168.1.100';
 const CONTROLLER_PORT       = parseInt(process.env.CONTROLLER_PORT       || '7000', 10);
 const BRIDGE_WEBSOCKET_PORT = parseInt(process.env.BRIDGE_WEBSOCKET_PORT || '8080', 10);
-const TCP_TIMEOUT_MS        = parseInt(process.env.TCP_TIMEOUT_MS || '5000', 10);
+const TCP_TIMEOUT_MS        = parseInt(process.env.TCP_TIMEOUT_MS        || '5000', 10);
 
 // Загружаем .proto
 // __dirname is src/server, so ../../file.proto refers to project_root/file.proto
@@ -50,11 +50,16 @@ function oneShotProtobuf(payloadFromFrontend, callback) {
   // Create Protobuf message
   let errMsg;
   try {
+    // Example: if oneofFieldName is "get_info", oneofFieldValue is {}
+    // ClientMessage.create({ get_info: {} })
     errMsg = ClientMessage.verify({ [oneofFieldName]: oneofFieldValue });
   } catch (e) {
+    console.error(`[Bridge - Protobuf Verify Catch] Error verifying ClientMessage with payload: ${JSON.stringify({ [oneofFieldName]: oneofFieldValue })}. Error: ${e.message}`);
     return callback(new Error(`Protobuf verification error for ${oneofFieldName}: ${e.message}`));
   }
+
   if (errMsg) {
+      console.error(`[Bridge - Protobuf Verify Failed] ClientMessage verification failed for field '${oneofFieldName}' with value '${JSON.stringify(oneofFieldValue)}'. Error: ${errMsg}`);
       return callback(new Error(`Protobuf verification failed for ${oneofFieldName}: ${errMsg}`));
   }
 
@@ -96,10 +101,11 @@ function oneShotProtobuf(payloadFromFrontend, callback) {
       const msgBuf = buffer.slice(4, 4 + expectedLen);
       try {
         const resp   = ControllerResponse.decode(msgBuf);
-        console.log('[Bridge] TCP response decoded:', JSON.stringify(resp.toJSON()));
+        const respJson = resp.toJSON(); // Convert to plain JS object
+        console.log('[Bridge] TCP response decoded:', JSON.stringify(respJson));
         if (!responded) {
             responded = true;
-            callback(null, resp.toJSON()); // Convert to plain JS object for JSON stringification
+            callback(null, respJson); 
         }
       } catch (e) {
           console.error('[Bridge] Error decoding TCP response:', e);
@@ -148,6 +154,9 @@ wss.on('connection', (ws) => {
     }
 
     // Basic validation of the payload structure expected by the bridge
+    // payloadFromFrontend should look like:
+    // { auth_token: "...", room_id: "...", message: { get_info: {} } } OR
+    // { auth_token: "...", room_id: "...", message: { set_state: { state: 0 } } }
     if (!payloadFromFrontend.message || typeof payloadFromFrontend.message !== 'object') {
       console.error('[Bridge] Missing or invalid "message" field in frontend payload.');
       return ws.send(JSON.stringify({ error: 'Invalid payload: Missing or malformed "message" field' }));

@@ -18,13 +18,16 @@ import {
   type ProtoControllerResponse
 } from '@/types/protobuf';
 
-const BRIDGE_WEBSOCKET_URL = typeof window !== 'undefined' ?
-  `ws://${process.env.NEXT_PUBLIC_BRIDGE_HOST || window.location.hostname}:${process.env.NEXT_PUBLIC_BRIDGE_PORT || '8080'}` :
-  'ws://localhost:8080'; // Fallback for SSR
+const BRIDGE_WEBSOCKET_URL_BASE = typeof window !== 'undefined' ?
+  `${process.env.NEXT_PUBLIC_BRIDGE_HOST || window.location.hostname}:${process.env.NEXT_PUBLIC_BRIDGE_PORT || '8080'}` :
+  'localhost:8080'; // Fallback for SSR
+const BRIDGE_WEBSOCKET_URL = typeof window !== 'undefined' ? `ws://${BRIDGE_WEBSOCKET_URL_BASE}` : 'ws://localhost:8080';
+
 
 const GET_STATE_INTERVAL = 7000; // Interval for polling state in ms
 const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_DELAY_BASE = 3000; // ms
+const RECONNECT_DELAY_BASE = 2000; // ms, initial delay
+const RECONNECT_DELAY_MAX = 30000; // ms, max delay
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 export type ControllerError = { message: string; type: 'websocket' | 'command_error' | 'auth' | 'parse' | 'bridge' } | null;
@@ -49,12 +52,16 @@ export function useRoomController(roomId: string, authToken: string | null) {
   const wsRef = useRef<WebSocket | null>(null);
   const stateUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
+  const connectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const sendMessageToBridge = useCallback((payload: ClientMessageOneofPayload) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // For get_info, auth_token and room_id are not strictly needed by the ClientMessage protobuf,
+      // but the bridge might use them for logging or other purposes.
+      // The bridge will only use the 'message' part for protobuf encoding.
       const messageForBridge: FrontendWebsocketMessage = {
-        auth_token: payload.get_info ? null : authToken, // Send token only if not get_info
-        room_id: payload.get_info ? null : roomId,        // Send room_id only if not get_info
+        auth_token: 'get_info' in payload ? null : authToken,
+        room_id: 'get_info' in payload ? null : roomId,
         message: payload
       };
       try {
@@ -77,7 +84,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
   }, [authToken, roomId]);
 
   const handleBridgeResponse = useCallback((data: any) => {
-    const bridgeResponse = data as BridgeResponse;
+    const bridgeResponse = data as BridgeResponse; // data is the parsed JSON from WebSocket
     console.log('[useRoomController] Received from bridge:', bridgeResponse);
 
     if (bridgeResponse.error) {
@@ -89,12 +96,29 @@ export function useRoomController(roomId: string, authToken: string | null) {
     }
 
     if (bridgeResponse.data) {
-      const controllerProtoResponse = bridgeResponse.data as ProtoControllerResponse; // This is ProtoControllerResponse like
+      // bridgeResponse.data is the ProtoControllerResponse (JSON version)
+      const controllerProtoResponse = bridgeResponse.data;
       if ('info' in controllerProtoResponse.response) {
-        setDeviceInfo(controllerProtoResponse.response.info);
-        toast({ title: 'Controller Info', description: `Fetched info for ${controllerProtoResponse.response.info.ble_name || 'controller'}.` });
-        if (authToken && roomId) { // After getting info, if authenticated, get initial state
+        const receivedInfo = controllerProtoResponse.response.info;
+        setDeviceInfo(receivedInfo);
+        // Update with the hardcoded values for display consistency in this demo
+        // setDeviceInfo({
+        //   ip: "192.168.1.100",
+        //   mac: "FE:E8:C0:D4:57:14",
+        //   ble_name: "ROOM_7",
+        //   token: "CM6wqJB5blIMvBKQ"
+        // });
+        toast({ title: 'Controller Info', description: `Fetched info for ${receivedInfo.ble_name || 'controller'}.` });
+        
+        // After getting info, if authenticated, get initial state and start polling
+        if (authToken && roomId) {
           sendMessageToBridge({ get_state: {} });
+          if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
+          stateUpdateIntervalRef.current = setInterval(() => {
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              sendMessageToBridge({ get_state: {} });
+            }
+          }, GET_STATE_INTERVAL);
         } else {
           toast({ title: "Info Received", description: "Controller info loaded. Authenticate to control the room.", variant: "default" });
         }
@@ -107,7 +131,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
              sendMessageToBridge({ get_state: {} });
           }
         } else {
-          const errorMsg = `Controller command failed for Room ${roomId}. Status: ${controllerProtoResponse.response.status}`;
+          const errorMsg = `Controller command failed for Room ${roomId}. Status: ${Statuses[controllerProtoResponse.response.status] || 'Unknown Error Status'}`;
           toast({ title: 'Command Error', description: errorMsg, variant: 'destructive' });
           setError({ message: errorMsg, type: 'command_error' });
         }
@@ -117,71 +141,94 @@ export function useRoomController(roomId: string, authToken: string | null) {
   }, [sendMessageToBridge, authToken, roomId]);
 
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback((isAttemptingReconnect = false) => {
     if (stateUpdateIntervalRef.current) {
       clearInterval(stateUpdateIntervalRef.current);
       stateUpdateIntervalRef.current = null;
     }
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
     if (wsRef.current) {
-      wsRef.current.onclose = null;
+      wsRef.current.onclose = null; // prevent onclose handler from trying to reconnect if we are manually disconnecting
       wsRef.current.close();
       wsRef.current = null;
     }
-    setConnectionStatus('disconnected');
-    setDeviceInfo(null);
-    setHardwareState(initialHardwareState);
-    // setError(null); // Keep error for user to see
-    console.log(`[useRoomController] WebSocket Disconnected for room ${roomId}`);
+    if (!isAttemptingReconnect) { // Only reset states if not part of a reconnect cycle
+        setConnectionStatus('disconnected');
+        // setDeviceInfo(null); // Keep info on brief disconnects unless full reset
+        // setHardwareState(initialHardwareState); // Keep state on brief disconnects
+        console.log(`[useRoomController] WebSocket Disconnected for room ${roomId}`);
+    }
   }, [roomId]);
 
 
   const connect = useCallback(() => {
-     if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED && wsRef.current.readyState !== WebSocket.CLOSING) {
+     if (!authToken && roomId) { // Allow get_info without auth, but show warning
+        toast({title: "Authentication Recommended", description: "No auth token found. You can fetch controller info, but commands will require authentication.", variant:"default"});
+     } else if (!authToken && !roomId) { // If trying to connect from a context where roomId might also be missing (e.g. generic controller page)
+        toast({title: "Missing Room ID & Auth", description: "Room ID and Auth Token are required for full functionality.", variant:"destructive"});
+        // For the HotelKey app, roomId should always be present on the room page.
+        // But this hook might be used in /controller-ui where roomId is also from store.
+     }
+
+
+     if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
         console.log("[useRoomController] WebSocket already connecting or open.");
         if(connectionStatus === 'connected') {
-            sendMessageToBridge({ get_info: {} }); // Re-fetch info on reconnect attempt if already connected
-             if (authToken && roomId && !stateUpdateIntervalRef.current) { // Restart polling if not active
+            sendMessageToBridge({ get_info: {} });
+            if (authToken && roomId && !stateUpdateIntervalRef.current) { 
                 stateUpdateIntervalRef.current = setInterval(() => sendMessageToBridge({ get_state: {} }), GET_STATE_INTERVAL);
             }
         }
         return;
     }
 
-    disconnect();
+    disconnect(true); // Disconnect with intent to reconnect/connect
     setConnectionStatus('connecting');
     setError(null);
-    reconnectAttemptsRef.current = 0;
+    // Do not reset reconnectAttemptsRef.current here, onopen will do it.
+    
     console.log(`[useRoomController] Attempting to connect to WebSocket: ${BRIDGE_WEBSOCKET_URL} for room ${roomId}`);
 
     try {
         wsRef.current = new WebSocket(BRIDGE_WEBSOCKET_URL);
-    } catch (e: any) {
-        console.error(`[useRoomController] WebSocket instantiation error for room ${roomId}:`, e);
-        setError({ message: e.message || 'Failed to create WebSocket.', type: 'websocket' });
+    } catch (e) {
+        const err = e as Error;
+        console.error(`[useRoomController] WebSocket instantiation error for room ${roomId}:`, err);
+        setError({ message: err.message || 'Failed to create WebSocket.', type: 'websocket' });
         setConnectionStatus('error');
         return;
     }
 
+    connectTimeoutRef.current = setTimeout(() => {
+        if (connectionStatus === 'connecting') {
+            console.error(`[useRoomController] WebSocket connection timeout for room ${roomId}.`);
+            setError({ message: 'Connection attempt timed out.', type: 'websocket' });
+            setConnectionStatus('error');
+            if (wsRef.current) {
+                 wsRef.current.onopen = null;
+                 wsRef.current.onmessage = null;
+                 wsRef.current.onerror = null;
+                 wsRef.current.onclose = null;
+                 wsRef.current.close();
+                 wsRef.current = null;
+            }
+            // Attempt reconnect after timeout if policy allows
+            // handleWebSocketClose({ wasClean: false, code: 4008, reason: "Connection Timeout" } as CloseEvent);
+        }
+    }, 10000); // 10 second connection timeout
+
+
     wsRef.current.onopen = () => {
+      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
       console.log(`[useRoomController] WebSocket Connected to bridge for room ${roomId}`);
-      reconnectAttemptsRef.current = 0;
+      reconnectAttemptsRef.current = 0; // Reset on successful connection
       setConnectionStatus('connected');
       toast({ title: 'Bridge Connected', description: `Connection to bridge established for Room ${roomId}.`});
-
       sendMessageToBridge({ get_info: {} }); // Always get_info on connect.
-
-      if (authToken && roomId) { // Only start polling if authenticated
-        if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
-        stateUpdateIntervalRef.current = setInterval(() => {
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            sendMessageToBridge({ get_state: {} });
-          } else {
-              if(stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
-          }
-        }, GET_STATE_INTERVAL);
-      } else {
-        console.log("[useRoomController] No authToken or roomId, not starting state polling.");
-      }
+      // Polling for get_state will start after info is received if authenticated
     };
 
     wsRef.current.onmessage = (event: MessageEvent) => {
@@ -194,44 +241,54 @@ export function useRoomController(roomId: string, authToken: string | null) {
         setIsSendingCommand(false);
       }
     };
+    
+    const handleWebSocketClose = (event: CloseEvent) => {
+        if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
+        console.log(`[useRoomController] WebSocket Connection Closed for room ${roomId}. Code: ${event.code}, Clean: ${event.wasClean}, Reason: ${event.reason}`);
+        if (stateUpdateIntervalRef.current) {
+            clearInterval(stateUpdateIntervalRef.current);
+            stateUpdateIntervalRef.current = null;
+        }
+
+        // Only try to reconnect if it wasn't a clean disconnect (e.g., server closed, network error)
+        // and we are not already in a 'disconnected' state set by manual disconnect()
+        if (!event.wasClean && connectionStatus !== 'disconnected') {
+            reconnectAttemptsRef.current++;
+            if (reconnectAttemptsRef.current <= MAX_RECONNECT_ATTEMPTS) {
+                const delay = Math.min(RECONNECT_DELAY_BASE * Math.pow(2, reconnectAttemptsRef.current -1), RECONNECT_DELAY_MAX);
+                console.log(`[useRoomController] Attempting to reconnect (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS}) in ${delay/1000}s...`);
+                setConnectionStatus('connecting'); // Show user we are trying
+                setError({message: `Connection lost. Attempting to reconnect... (${reconnectAttemptsRef.current})`, type: 'websocket'});
+                setTimeout(() => {
+                    if (connectionStatus === 'connecting') connect(); // Only connect if still in 'connecting' state
+                }, delay);
+            } else {
+                console.error(`[useRoomController] Max reconnect attempts reached for room ${roomId}.`);
+                setError({ message: 'Failed to connect to the bridge after multiple attempts.', type: 'websocket' });
+                setConnectionStatus('error');
+            }
+        } else {
+            // If it was a clean close, or we manually disconnected, just ensure state is 'disconnected' or 'error'
+            if (connectionStatus !== 'error' && connectionStatus !== 'disconnected') {
+                setConnectionStatus('disconnected');
+            }
+        }
+         // wsRef.current = null; // Should be nulled by disconnect or if it's truly closed
+    };
 
     wsRef.current.onerror = (event) => {
+      // onerror is usually followed by onclose. Let onclose handle reconnect logic.
       console.error(`[useRoomController] WebSocket Error for room ${roomId}:`, event);
-      // No need to set error here directly, onclose will handle it.
+      setError({ message: 'WebSocket connection error. Bridge service might be offline or unreachable.', type: 'websocket' });
+      // setConnectionStatus('error'); // onclose will set appropriate state
     };
 
-    wsRef.current.onclose = (event) => {
-      console.log(`[useRoomController] WebSocket Connection Closed for room ${roomId}. Code: ${event.code}, Clean: ${event.wasClean}, Reason: ${event.reason}`);
-      if (stateUpdateIntervalRef.current) {
-        clearInterval(stateUpdateIntervalRef.current);
-        stateUpdateIntervalRef.current = null;
-      }
-
-      if (wsRef.current && !event.wasClean) { // wsRef.current must be non-null (not manually disconnected)
-        reconnectAttemptsRef.current++;
-        if (reconnectAttemptsRef.current <= MAX_RECONNECT_ATTEMPTS) {
-          console.log(`[useRoomController] Attempting to reconnect (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
-          setConnectionStatus('connecting');
-          setTimeout(() => {
-            connect();
-          }, RECONNECT_DELAY_BASE * Math.pow(2, reconnectAttemptsRef.current -1));
-        } else {
-          console.error(`[useRoomController] Max reconnect attempts reached for room ${roomId}.`);
-          setError({ message: 'Failed to connect to the bridge after multiple attempts.', type: 'websocket' });
-          setConnectionStatus('error');
-          wsRef.current = null;
-        }
-      } else {
-         if (connectionStatus !== 'error') { // Only set to disconnected if not already in an error state
-            setConnectionStatus('disconnected');
-         }
-         wsRef.current = null;
-      }
-    };
+    wsRef.current.onclose = handleWebSocketClose;
   }, [roomId, authToken, disconnect, handleBridgeResponse, sendMessageToBridge, connectionStatus]);
 
 
   useEffect(() => {
+    // Cleanup on unmount
     return () => {
       console.log(`[useRoomController] Unmounting for room ${roomId}, disconnecting.`);
       disconnect();
@@ -249,7 +306,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
       setError({message: 'Not connected to controller bridge.', type: 'websocket'});
       return;
     }
-    setError(null);
+    setError(null); // Clear previous errors before sending new command
     sendMessageToBridge({ set_state: { state: command } });
   }, [connectionStatus, sendMessageToBridge, authToken]);
 
