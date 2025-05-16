@@ -1,3 +1,4 @@
+
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Room, Booking, UserCredentials, BookingDetails, RoomControls } from '@/types/hotel';
@@ -8,6 +9,7 @@ interface HotelState {
     email: string | null;
     role: 'guest' | 'admin' | null;
     currentBookingId: string | null;
+    authToken: string | null; // Added for controller authentication
   };
   rooms: Room[];
   bookings: Booking[];
@@ -29,6 +31,11 @@ const initialRoomsData: Room[] = [
   { id: '202', status: 'free', guestName: null, lightOn: false, doorLocked: true, acOn: false, temperature: 22, humidity: 48 },
 ];
 
+const generateMockToken = (roomId: string, userEmail: string | null): string => {
+  if (!userEmail) return `MOCK_JWT_FOR_${roomId}_USER_ANONYMOUS_EXP_${Date.now() + 86400000}`;
+  return `MOCK_JWT_FOR_${roomId}_USER_${userEmail.split('@')[0]}_EXP_${Date.now() + 86400000}`;
+};
+
 export const useHotelStore = create<HotelState>()(
   persist(
     (set, get) => ({
@@ -37,6 +44,7 @@ export const useHotelStore = create<HotelState>()(
         email: null,
         role: null,
         currentBookingId: null,
+        authToken: null, // Initialize authToken
       },
       rooms: initialRoomsData,
       bookings: [],
@@ -46,42 +54,70 @@ export const useHotelStore = create<HotelState>()(
       login: async (credentials) => {
         // Simulate API call
         await new Promise(resolve => setTimeout(resolve, 500));
+        let userRole: 'guest' | 'admin' | null = null;
+        let userName: string | null = null;
+
         if (credentials.email === 'admin@hotel.key' && credentials.password === 'admin') {
-          set({ user: { name: 'Admin User', email: credentials.email, role: 'admin', currentBookingId: null } });
+          userName = 'Admin User';
+          userRole = 'admin';
+        } else if (credentials.email === 'guest@hotel.key' && credentials.password === 'guest') {
+          userName = 'Guest User';
+          userRole = 'guest';
+        } else if (credentials.password === 'guest') { // Allow any guest login for prototype ease
+          userName = credentials.email.split('@')[0] || 'Guest User';
+          userRole = 'guest';
+        }
+
+        if (userRole) {
+          // Find if user has an existing booking to potentially re-assign authToken
+          const existingBookingForUser = get().bookings.find(b => b.guestEmail === credentials.email);
+          let authToken: string | null = null;
+          let currentBookingId: string | null = null;
+
+          if (existingBookingForUser && userRole === 'guest') {
+            authToken = generateMockToken(existingBookingForUser.roomId, credentials.email);
+            currentBookingId = existingBookingForUser.id;
+          }
+          
+          set({ user: { 
+            name: userName, 
+            email: credentials.email, 
+            role: userRole, 
+            currentBookingId: currentBookingId,
+            authToken: authToken 
+          }});
           return true;
         }
-        if (credentials.email === 'guest@hotel.key' && credentials.password === 'guest') {
-          set({ user: { name: 'Guest User', email: credentials.email, role: 'guest', currentBookingId: null } });
-          return true;
-        }
-        // Allow any guest login for prototype ease
-        if (credentials.password === 'guest') {
-           set({ user: { name: credentials.email.split('@')[0] || 'Guest User', email: credentials.email, role: 'guest', currentBookingId: null } });
-           return true;
-        }
+        set({ user: { name: null, email: null, role: null, currentBookingId: null, authToken: null } }); // Clear on failed login
         return false;
       },
       logout: () => {
-        set({ user: { name: null, email: null, role: null, currentBookingId: null } });
+        set({ user: { name: null, email: null, role: null, currentBookingId: null, authToken: null } });
       },
       createBooking: async (details) => {
         // Simulate API call
         await new Promise(resolve => setTimeout(resolve, 500));
         const newBookingId = `booking-${Date.now()}`;
+        const guestEmail = get().user.email;
+        if (!guestEmail) return null; // Should not happen if user is logged in
+
         const newBooking: Booking = {
           id: newBookingId,
           roomId: details.roomId,
-          guestEmail: get().user.email!,
+          guestEmail: guestEmail,
           guestName: details.guestName,
           checkInDate: details.checkInDate,
           checkOutDate: details.checkOutDate,
         };
+
+        const newAuthToken = generateMockToken(details.roomId, guestEmail);
+
         set(state => ({
           bookings: [...state.bookings, newBooking],
           rooms: state.rooms.map(room =>
             room.id === details.roomId ? { ...room, status: 'occupied', guestName: details.guestName } : room
           ),
-          user: { ...state.user, currentBookingId: newBookingId }
+          user: { ...state.user, currentBookingId: newBookingId, authToken: newAuthToken }
         }));
         return newBookingId;
       },
@@ -91,16 +127,14 @@ export const useHotelStore = create<HotelState>()(
             room.id === roomId ? { ...room, ...controls } : room
           ),
         }));
-        // In a real app, this would also send a command to the controller
       },
       fetchRoomSensorData: (roomId) => {
-        // Simulate fetching new sensor data
         set(state => ({
           rooms: state.rooms.map(room =>
             room.id === roomId ? {
               ...room,
-              temperature: Math.floor(Math.random() * 5) + 20, // 20-24 C
-              humidity: Math.floor(Math.random() * 20) + 40,   // 40-59 %
+              temperature: Math.floor(Math.random() * 5) + 20, 
+              humidity: Math.floor(Math.random() * 20) + 40,
             } : room
           ),
         }));
@@ -119,14 +153,13 @@ export const useHotelStore = create<HotelState>()(
       },
     }),
     {
-      name: 'hotelkey-storage', // name of the item in the storage (must be unique)
-      storage: createJSONStorage(() => localStorage), // (optional) by default, 'localStorage' is used
-      partialize: (state) => ({ user: state.user, bookings: state.bookings }), // Persist only user and bookings
+      name: 'hotelkey-storage',
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({ user: state.user, bookings: state.bookings, rooms: state.rooms /* Persist rooms for admin view consistency */ }),
     }
   )
 );
 
-// Initialize rooms on first load if not already in store (e.g. after clearing localStorage)
 if (typeof window !== 'undefined') {
   const storedState = JSON.parse(localStorage.getItem('hotelkey-storage') || '{}');
   if (!storedState.state?.rooms || storedState.state.rooms.length === 0) {

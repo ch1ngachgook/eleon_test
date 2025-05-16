@@ -1,3 +1,4 @@
+
 // Based on the provided .proto file
 
 export enum ProtoStatuses {
@@ -33,7 +34,7 @@ export enum ProtoCommandStates {
 }
 
 export interface ProtoIdentifyRequest {
-  Token: string;
+  Token: string; // This seems like an old field, new auth_token is top-level in ClientMessage
 }
 
 export interface ProtoGetStateRequest {}
@@ -58,7 +59,7 @@ export interface ProtoInfoResponse {
   ip: string;
   mac: string;
   ble_name: string;
-  token: string;
+  token: string; // This is the controller's internal token/identifier, not the auth_token
 }
 
 // ClientMessage (Request)
@@ -67,9 +68,15 @@ export type ProtoClientMessagePayload =
   | { set_state: ProtoSetStateRequest }
   | { get_state: ProtoGetStateRequest };
 
-export interface ProtoClientMessage {
-  message: ProtoClientMessagePayload;
+export interface ClientMessageBase {
+  auth_token?: string | null; // Field 1
+  room_id?: string | null;    // Field 2 - Using string to match JS roomId type
 }
+
+export interface ProtoClientMessage extends ClientMessageBase {
+  message: ProtoClientMessagePayload; // Oneof starting from field 3
+}
+
 
 // ControllerResponse
 export type ProtoControllerResponsePayload =
