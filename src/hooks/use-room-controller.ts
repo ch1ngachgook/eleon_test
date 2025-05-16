@@ -13,7 +13,7 @@ import {
   type ProtoClientMessage,
   type ProtoControllerResponse,
   type ProtoClientMessagePayload,
-} from '@/types/protobuf'; // Ensure enum imports are not type-only
+} from '@/types/protobuf';
 import * as BleService from '@/lib/ble-service';
 import { toast } from '@/hooks/use-toast';
 
@@ -86,8 +86,8 @@ export function useRoomController(roomId: string, authToken: string | null) {
   const sendTcpMessage = useCallback((payload: ProtoClientMessagePayload) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       const message: ProtoClientMessage = {
-        auth_token: ('get_info' in payload) ? null : authToken, // No auth for get_info
-        room_id: ('get_info' in payload) ? null : roomId,       // No room_id for get_info
+        auth_token: ('get_info' in payload) ? null : authToken,
+        room_id: ('get_info' in payload) ? null : roomId,
         message: payload,
       };
       wsRef.current.send(serializeClientMessage(message));
@@ -96,7 +96,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
       setError({ message: 'TCP connection not open.', type: 'tcp' });
       setIsSendingCommand(false);
     }
-  }, [authToken, roomId, connectionStatus]); // Removed wsRef from deps as it's a ref
+  }, [authToken, roomId, connectionStatus]);
 
   const handleWebSocketMessage = useCallback((event: MessageEvent) => {
     const response = parseControllerResponse(event.data as ArrayBuffer);
@@ -130,7 +130,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
       setIsSendingCommand(false);
       return;
     }
-     if (!authToken && !('get_info' in payload)) { // Auth not needed for get_info
+     if (!authToken && !('get_info' in payload)) {
       setError({ message: 'BLE authentication token missing.', type: 'auth' });
       setIsSendingCommand(false);
       return;
@@ -183,12 +183,11 @@ export function useRoomController(roomId: string, authToken: string | null) {
       setError({ message: e.message || `BLE communication error for room ${roomId}.`, type: 'ble' });
       setIsSendingCommand(false);
     }
-  }, [connectionStatus, deviceInfo, roomId, authToken, hardwareState]); // Added hardwareState to deps for sendBleMessage
+  }, [connectionStatus, deviceInfo, roomId, authToken, hardwareState]);
 
 
   const connectTcp = useCallback(() => {
-    if (!authToken && connectionStatus !== 'connecting_tcp' && connectionStatus !== 'connected_tcp') { // Allow get_info without token initially
-        // This specific check allows initial connection for get_info, other commands will fail if token is still null
+    if (!authToken && connectionStatus !== 'connecting_tcp' && connectionStatus !== 'connected_tcp') {
     } else if (!authToken) {
         setError({ message: 'Authentication token is missing for TCP connection.', type: 'auth' });
         toast({ title: 'Connection Failed', description: 'Auth token missing.', variant: 'destructive' });
@@ -253,7 +252,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
             setHardwareState(newHardwareStateSlice); 
             mockResponse = { response: { status: ProtoStatuses.Ok }};
           } else {
-            mockResponse = { response: { status: ProtoStatuses.Error }}};
+            mockResponse = { response: { status: ProtoStatuses.Error }};
           }
           console.log("[ControllerHook MockWS] onmessage (simulated):", mockResponse);
           if (mockWs.onmessage) mockWs.onmessage({ data: serializeClientMessage(mockResponse as any) } as MessageEvent);
@@ -277,7 +276,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
       setConnectionStatus('connected_tcp');
       toast({ title: 'TCP Connected', description: `Connection to controller established for Room ${roomId}.`});
       sendTcpMessage({ get_info: {} }); 
-      if(authToken) { // Only get state if authenticated
+      if(authToken) {
         setTimeout(() => sendTcpMessage({ get_state: {} }), 200); 
         if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
         stateUpdateIntervalRef.current = setInterval(() => {
@@ -299,7 +298,6 @@ export function useRoomController(roomId: string, authToken: string | null) {
     wsRef.current.onclose = () => {
       console.log(`[ControllerHook] WebSocket Disconnected for room ${roomId} (Simulated)`);
       if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
-      // Do not set to 'disconnected' here if an error caused the close, error state is more informative
       if (connectionStatus !== 'error') {
           // setConnectionStatus('disconnected');
       }
@@ -321,23 +319,15 @@ export function useRoomController(roomId: string, authToken: string | null) {
       setConnectionStatus('error');
       return;
     }
-    // Allow get_info without token
-    // if (!authToken) {
-    //   setError({ message: 'Authentication token is missing for BLE connection.', type: 'auth' });
-    //   toast({ title: 'BLE Connection Failed', description: 'Auth token missing.', variant: 'destructive' });
-    //   setConnectionStatus('error');
-    //   return;
-    // }
 
     disconnectAll();
-    const sharedBleName = "ROOM_7"; // Use the specific BLE name from controller info for connection
+    const sharedBleName = "ROOM_7";
     setConnectionStatus('connecting_ble');
     setError(null);
 
     try {
       bleDeviceRef.current = await BleService.requestDevice({ filters: [{ name: sharedBleName }] });
-      if (!bleDeviceRef.current) {
-        // setConnectionStatus('disconnected'); 
+      if (!bleDeviceRef.current) { 
         setError({ message: 'BLE device not found or selection cancelled.', type: 'ble' });
         return;
       }
@@ -354,7 +344,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
       toast({ title: 'BLE Connected', description: `Authenticated with ${sharedBleName} for Room ${roomId}.`});
 
       sendBleMessage({ get_info: {} }); 
-      if (authToken) { // Only get state if authenticated
+      if (authToken) {
         setTimeout(() => sendBleMessage({ get_state: {} }), 200); 
         if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
         stateUpdateIntervalRef.current = setInterval(() => {
@@ -373,8 +363,6 @@ export function useRoomController(roomId: string, authToken: string | null) {
 
 
   const connect = useCallback(() => {
-    // Prioritize TCP. User can choose BLE if needed or if TCP fails.
-    // No automatic BLE fallback here, user must initiate if desired.
     connectTcp();
   }, [connectTcp]);
 
@@ -394,7 +382,7 @@ export function useRoomController(roomId: string, authToken: string | null) {
       setError({message: 'Auth token missing for command', type: 'auth'});
       return;
     }
-    setError(null); // Clear previous command errors
+    setError(null);
     const payload: ProtoClientMessagePayload = { set_state: { state: commandState } };
     if (connectionStatus === 'connected_tcp' && wsRef.current) {
       sendTcpMessage(payload);
@@ -413,16 +401,14 @@ export function useRoomController(roomId: string, authToken: string | null) {
     error,
     isSendingCommand,
     connect,
-    connectBle, // Expose BLE connect separately
+    connectBle,
     disconnect: useCallback(() => { 
       disconnectAll();
       setConnectionStatus('disconnected');
-      setDeviceInfo(null); // Clear device info on disconnect
-      setHardwareState(initialHardwareState); // Reset hardware state
-      setError(null); // Clear any errors
+      setDeviceInfo(null);
+      setHardwareState(initialHardwareState);
+      setError(null);
     }, [disconnectAll]),
     sendCommand,
   };
 }
-
-    
