@@ -1,3 +1,4 @@
+
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -11,6 +12,9 @@ import { toast } from '@/hooks/use-toast';
 import { Thermometer, Droplets, Lightbulb, DoorOpen, Snowflake, KeyRound, WifiOff } from 'lucide-react';
 import * as BleService from '@/lib/ble-service'; // Simulated BLE service
 import { Skeleton } from '../ui/skeleton';
+import RoomStatusPanel from './room-status-panel'; // Added import
+import { useRouter } from 'next/navigation'; // Added import for router
+
 
 interface RoomControlClientPageProps {
   bookingId: string;
@@ -23,6 +27,7 @@ export default function RoomControlClientPage({ bookingId }: RoomControlClientPa
   const [isLoading, setIsLoading] = useState(true);
   const [bleConnected, setBleConnected] = useState(false);
   const [bleDeviceName, setBleDeviceName] = useState<string | null>(null);
+  const router = useRouter(); // Added router
 
   useEffect(() => {
     const booking = bookings.find(b => b.id === bookingId && b.guestEmail === user.email);
@@ -31,7 +36,7 @@ export default function RoomControlClientPage({ bookingId }: RoomControlClientPa
       const room = rooms.find(r => r.id === booking.roomId);
       setCurrentRoom(room || null);
       if (room) {
-         // Periodically fetch sensor data
+         // Periodically fetch sensor data via Zustand store (PWA cache friendly)
         const intervalId = setInterval(() => fetchRoomSensorData(room.id), 10000); // every 10s
         setIsLoading(false);
         return () => clearInterval(intervalId);
@@ -44,56 +49,55 @@ export default function RoomControlClientPage({ bookingId }: RoomControlClientPa
   const handleBleConnect = async () => {
     if (!currentRoom) return;
     try {
-      const deviceName = `HotelKeyRoom-${currentRoom.id}`;
+      const deviceName = `HotelKeyRoom-${currentRoom.id}`; // Default BLE name pattern
       setBleDeviceName(deviceName);
+      // Assuming BleService.requestDevice etc. are still relevant for a simplified BLE interaction
       const device = await BleService.requestDevice({ filters: [{ name: deviceName }] });
       if (device) {
         await BleService.connectToGattServer(device);
-        // Further characteristic interactions would go here
         setBleConnected(true);
-        toast({ title: 'BLE Connected', description: `Connected to ${deviceName}.` });
+        toast({ title: 'BLE Connected (Legacy)', description: `Connected to ${deviceName}.` });
       }
     } catch (error) {
-      console.error('BLE Connection Error:', error);
-      toast({ title: 'BLE Error', description: (error as Error).message, variant: 'destructive' });
+      console.error('Legacy BLE Connection Error:', error);
+      toast({ title: 'BLE Error (Legacy)', description: (error as Error).message, variant: 'destructive' });
       setBleConnected(false);
     }
   };
   
-  const handleToggleControl = async (controlType: 'light' | 'door' | 'ac', value?: boolean) => {
+  // This controls the Zustand store version of room state, usually via simulated BLE
+  const handleToggleStoreControl = async (controlType: 'light' | 'door' | 'ac', value?: boolean) => {
     if (!currentRoom) return;
 
     let newValue: boolean;
-    let updatePayload: Partial<RoomControls> = {};
+    let updatePayload: Partial<RoomControls> = {}; // Corrected type name
 
     switch (controlType) {
       case 'light':
         newValue = value !== undefined ? value : !currentRoom.lightOn;
         updatePayload = { lightOn: newValue };
-        if (bleConnected) await BleService.sendLightCommand(newValue);
+        if (bleConnected) await BleService.sendLightCommand(newValue); // Legacy BLE command
         break;
-      case 'door': // For door, it's an action, not a toggle of state typically
-        if (bleConnected) await BleService.sendDoorCommand(true); // true for open
-        toast({ title: 'Door Unlock Signal Sent', description: 'If BLE connected, command sent.' });
-        // Note: Door lock state might be read-only or auto-lock.
-        // For this simulation, we'll toggle it optimistically if not BLE connected.
+      case 'door': 
+        if (bleConnected) await BleService.sendDoorCommand(true); // Legacy BLE: true for open
+        toast({ title: 'Door Unlock Signal Sent (Legacy BLE)', description: 'If legacy BLE connected, command sent.' });
         if(!bleConnected) updatePayload = { doorLocked: !currentRoom.doorLocked };
-        else updatePayload = { doorLocked: false }; // Assume it unlocks
+        else updatePayload = { doorLocked: false }; 
         break;
       case 'ac':
         newValue = value !== undefined ? value : !currentRoom.acOn;
         updatePayload = { acOn: newValue };
-        if (bleConnected) await BleService.sendAcCommand(newValue);
+        if (bleConnected) await BleService.sendAcCommand(newValue); // Legacy BLE command
         break;
       default:
         return;
     }
     
-    updateRoomControls(currentRoom.id, updatePayload);
+    updateRoomControls(currentRoom.id, updatePayload); // Updates Zustand store
     
     toast({
-      title: `${controlType.charAt(0).toUpperCase() + controlType.slice(1)} Control`,
-      description: `${controlType.charAt(0).toUpperCase() + controlType.slice(1)} ${controlType === 'door' ? 'unlock signal sent' : (Object.values(updatePayload)[0] ? 'turned ON' : 'turned OFF')}.`,
+      title: `Store ${controlType.charAt(0).toUpperCase() + controlType.slice(1)} Control`,
+      description: `${controlType.charAt(0).toUpperCase() + controlType.slice(1)} ${controlType === 'door' ? 'unlock signal sent' : (Object.values(updatePayload)[0] ? 'turned ON' : 'turned OFF')}. (Via Zustand/Legacy BLE)`,
     });
   };
 
@@ -114,13 +118,13 @@ export default function RoomControlClientPage({ bookingId }: RoomControlClientPa
 
   if (!currentBooking || !currentRoom) {
     return (
-      <Card className="text-center">
+      <Card className="text-center shadow-xl">
         <CardHeader>
-          <CardTitle>Booking Not Found</CardTitle>
+          <CardTitle>Информация о бронировании не найдена</CardTitle>
         </CardHeader>
         <CardContent>
-          <p>Could not find details for this booking, or it does not belong to you.</p>
-          <Button onClick={() => router.push('/')} className="mt-4">Go to Bookings</Button>
+          <p>Не удалось найти детали для этого бронирования, или оно не принадлежит вам.</p>
+          <Button onClick={() => router.push('/')} className="mt-4">Перейти к бронированиям</Button>
         </CardContent>
       </Card>
     );
@@ -132,30 +136,34 @@ export default function RoomControlClientPage({ bookingId }: RoomControlClientPa
         <CardHeader>
           <CardTitle className="text-3xl font-bold flex items-center">
             <KeyRound className="mr-3 h-8 w-8 text-primary" />
-            Room {currentRoom.id} Control Panel
+            Панель управления комнатой {currentRoom.id}
           </CardTitle>
-          <CardDescription>Welcome, {user.name}! Manage your room amenities below.</CardDescription>
+          <CardDescription>Добро пожаловать, {user.name}! Управляйте удобствами вашей комнаты ниже.</CardDescription>
         </CardHeader>
       </Card>
 
-      <Card>
+      {/* New Room Status Panel for direct controller interaction */}
+      <RoomStatusPanel roomId={currentRoom.id} />
+
+      {/* Existing simplified BLE control and sensor display (can be kept for PWA offline view or specific BLE demo) */}
+      <Card className="shadow-lg mt-6">
         <CardHeader>
           <CardTitle className="text-xl flex items-center">
              {bleConnected ? <WifiOff className="mr-2 h-6 w-6 text-green-500" /> : <WifiOff className="mr-2 h-6 w-6 text-red-500" />}
-             Bluetooth (BLE) Control
+             Управление через BLE (Упрощенное/PWA)
           </CardTitle>
-          <CardDescription>Connect to your room's smart hub via Bluetooth for direct control.</CardDescription>
+          <CardDescription>Это управление имитирует базовые BLE команды и обновляет состояние в PWA.</CardDescription>
         </CardHeader>
         <CardContent>
           {bleConnected ? (
-            <div className="text-green-600 font-semibold">Connected to {bleDeviceName || 'room device'}</div>
+            <div className="text-green-600 font-semibold">Подключено к {bleDeviceName || 'устройству комнаты'} (Упрощенное BLE)</div>
           ) : (
             <Button onClick={handleBleConnect} className="w-full md:w-auto">
-              Connect to Room Device
+              Подключиться к устройству (Упрощенное BLE)
             </Button>
           )}
           <p className="text-xs text-muted-foreground mt-2">
-            Ensure Bluetooth is enabled on your device. This feature uses Web Bluetooth API (simulated).
+            Эта функция использует Web Bluetooth API (симуляция) для базовых команд.
           </p>
         </CardContent>
       </Card>
@@ -164,58 +172,60 @@ export default function RoomControlClientPage({ bookingId }: RoomControlClientPa
         <Card className="shadow-md">
           <CardHeader>
             <CardTitle className="text-xl flex items-center">
-                <Lightbulb className="mr-2 h-6 w-6 text-yellow-400" /> Room Controls
+                <Lightbulb className="mr-2 h-6 w-6 text-yellow-400" /> Управление (PWA/Offline)
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
-              <Label htmlFor="light-switch" className="text-lg flex items-center">
-                <Lightbulb className="mr-2 h-5 w-5" /> Light
+              <Label htmlFor="legacy-light-switch" className="text-lg flex items-center">
+                <Lightbulb className="mr-2 h-5 w-5" /> Свет (Store)
               </Label>
               <Switch
-                id="light-switch"
-                checked={currentRoom.lightOn}
-                onCheckedChange={(value) => handleToggleControl('light', value)}
-                aria-label="Toggle light"
+                id="legacy-light-switch"
+                checked={currentRoom.lightOn} // From Zustand Store
+                onCheckedChange={(value) => handleToggleStoreControl('light', value)}
+                aria-label="Toggle light (Store)"
               />
             </div>
             <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
-              <Label htmlFor="ac-switch" className="text-lg flex items-center">
-                <Snowflake className="mr-2 h-5 w-5" /> Air Conditioner
+              <Label htmlFor="legacy-ac-switch" className="text-lg flex items-center">
+                <Snowflake className="mr-2 h-5 w-5" /> A/C (Store)
               </Label>
               <Switch
-                id="ac-switch"
-                checked={currentRoom.acOn}
-                onCheckedChange={(value) => handleToggleControl('ac', value)}
-                aria-label="Toggle air conditioner"
+                id="legacy-ac-switch"
+                checked={currentRoom.acOn} // From Zustand Store
+                onCheckedChange={(value) => handleToggleStoreControl('ac', value)}
+                aria-label="Toggle air conditioner (Store)"
               />
             </div>
-             <Button onClick={() => handleToggleControl('door')} className="w-full" variant="outline" size="lg">
+             <Button onClick={() => handleToggleStoreControl('door')} className="w-full" variant="outline" size="lg">
               <DoorOpen className="mr-2 h-5 w-5" /> 
-              {currentRoom.doorLocked ? 'Unlock Door' : 'Lock Door (Simulated)'}
+              {currentRoom.doorLocked ? 'Открыть дверь (Store)' : 'Закрыть дверь (Store)'}
             </Button>
-            <p className="text-xs text-muted-foreground text-center">Door is currently {currentRoom.doorLocked ? 'Locked' : 'Unlocked'}</p>
+            <p className="text-xs text-muted-foreground text-center">Дверь (Store): {currentRoom.doorLocked ? 'Закрыта' : 'Открыта'}</p>
           </CardContent>
         </Card>
 
         <Card className="shadow-md">
           <CardHeader>
             <CardTitle className="text-xl flex items-center">
-                <Thermometer className="mr-2 h-6 w-6 text-red-500" /> Sensor Data
+                <Thermometer className="mr-2 h-6 w-6 text-red-500" /> Данные датчиков (Store)
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between p-3 bg-muted rounded-lg text-lg">
-              <span className="flex items-center"><Thermometer className="mr-2 h-5 w-5 text-orange-500" /> Temperature:</span>
+              <span className="flex items-center"><Thermometer className="mr-2 h-5 w-5 text-orange-500" /> Температура:</span>
               <span>{currentRoom.temperature}°C</span>
             </div>
             <div className="flex items-center justify-between p-3 bg-muted rounded-lg text-lg">
-              <span className="flex items-center"><Droplets className="mr-2 h-5 w-5 text-blue-500" /> Humidity:</span>
+              <span className="flex items-center"><Droplets className="mr-2 h-5 w-5 text-blue-500" /> Влажность:</span>
               <span>{currentRoom.humidity}%</span>
             </div>
+             {/* Pressure is not in useHotelStore.Room, so it would come from direct controller if available */}
           </CardContent>
         </Card>
       </div>
     </div>
   );
 }
+
