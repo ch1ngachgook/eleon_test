@@ -33,9 +33,10 @@ export enum ProtoCommandStates {
   Channel2Off = 7,
 }
 
-export interface ProtoIdentifyRequest {
-  Token: string; // This seems like an old field, new auth_token is top-level in ClientMessage
-}
+// IdentifyRequest is not used with top-level auth_token in ClientMessage
+// export interface ProtoIdentifyRequest {
+//   Token: string; 
+// }
 
 export interface ProtoGetStateRequest {}
 
@@ -64,13 +65,14 @@ export interface ProtoInfoResponse {
 
 // ClientMessage (Request)
 export type ProtoClientMessagePayload =
-  | { get_info: ProtoGetInfoRequest }
-  | { set_state: ProtoSetStateRequest }
-  | { get_state: ProtoGetStateRequest };
+  | { get_info: ProtoGetInfoRequest } // field 3
+  | { get_state: ProtoGetStateRequest } // field 4
+  | { set_state: ProtoSetStateRequest }; // field 5
 
+// Base fields for ClientMessage
 export interface ClientMessageBase {
-  auth_token?: string | null; // Field 1
-  room_id?: string | null;    // Field 2 - Using string to match JS roomId type
+  auth_token: string | null; // Field 1
+  room_id: string | null;    // Field 2 (Using string to match JS roomId type, .proto has int32)
 }
 
 export interface ProtoClientMessage extends ClientMessageBase {
@@ -87,3 +89,6 @@ export type ProtoControllerResponsePayload =
 export interface ProtoControllerResponse {
   response: ProtoControllerResponsePayload;
 }
+
+
+    

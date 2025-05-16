@@ -14,16 +14,14 @@ import {
   type ProtoControllerResponse,
   type ProtoClientMessagePayload,
 } from '@/types/protobuf';
-import * as BleService from '@/lib/ble-service';
+// Removed BleService import as focus is on WebSocket bridge
 import { toast } from '@/hooks/use-toast';
 
-const CONTROLLER_IP = '192.168.1.100'; // This is the single, shared controller
-const CONTROLLER_PORT = 7000;
-const BLE_SERVICE_UUID = '0x00ff'; // Shared controller's BLE service
-const BLE_CHARACTERISTIC_UUID = '0xff02'; // Shared controller's BLE characteristic
+const BRIDGE_WEBSOCKET_URL = 'ws://localhost:8080'; // Real bridge URL
+const GET_STATE_INTERVAL = 7000; // Interval for polling state in ms
 
-export type ConnectionStatus = 'disconnected' | 'connecting_tcp' | 'connected_tcp' | 'connecting_ble' | 'authenticating_ble' | 'connected_ble' | 'error';
-export type ControllerError = { message: string; type: 'tcp' | 'ble' | 'command' | 'auth' } | null;
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type ControllerError = { message: string; type: 'websocket' | 'command' | 'auth' | 'parse' } | null;
 
 const initialHardwareState: ProtoStateResponse = {
   light_on: ProtoLightStates.Off,
@@ -35,9 +33,10 @@ const initialHardwareState: ProtoStateResponse = {
   pressure: 0,
 };
 
-// Helper functions outside the hook to ensure stable references
+// Helper functions outside the hook
 const parseControllerResponse = (data: ArrayBuffer): ProtoControllerResponse | null => {
   try {
+    // Assuming bridge sends JSON string over WebSocket for now
     const textDecoder = new TextDecoder();
     const jsonString = textDecoder.decode(data);
     return JSON.parse(jsonString) as ProtoControllerResponse;
@@ -48,11 +47,11 @@ const parseControllerResponse = (data: ArrayBuffer): ProtoControllerResponse | n
 };
 
 const serializeClientMessage = (message: ProtoClientMessage): ArrayBuffer => {
+  // Assuming bridge expects JSON string over WebSocket for now
   const jsonString = JSON.stringify(message);
   const textEncoder = new TextEncoder();
   return textEncoder.encode(jsonString).buffer;
 };
-
 
 export function useRoomController(roomId: string, authToken: string | null) {
   const [deviceInfo, setDeviceInfo] = useState<ProtoInfoResponse | null>(null);
@@ -62,337 +61,197 @@ export function useRoomController(roomId: string, authToken: string | null) {
   const [isSendingCommand, setIsSendingCommand] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const bleDeviceRef = useRef<any | null>(null); 
-  const bleCharacteristicRef = useRef<any | null>(null); 
   const stateUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const MAX_RECONNECT_ATTEMPTS = 5;
+  const RECONNECT_DELAY = 3000;
 
-  const disconnectAll = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (bleDeviceRef.current && bleDeviceRef.current.gatt?.connected) {
-      bleDeviceRef.current.gatt.disconnect();
-    }
-    bleDeviceRef.current = null;
-    bleCharacteristicRef.current = null;
-    if (stateUpdateIntervalRef.current) {
-      clearInterval(stateUpdateIntervalRef.current);
-      stateUpdateIntervalRef.current = null;
-    }
-    // setConnectionStatus('disconnected'); // Reset status on explicit disconnect
-  }, []);
 
-  const sendTcpMessage = useCallback((payload: ProtoClientMessagePayload) => {
+  const sendMessage = useCallback((payload: ProtoClientMessagePayload) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      const isGetInfo = 'get_info' in payload;
       const message: ProtoClientMessage = {
-        auth_token: ('get_info' in payload) ? null : authToken,
-        room_id: ('get_info' in payload) ? null : roomId,
+        auth_token: isGetInfo ? null : authToken,
+        room_id: isGetInfo ? null : roomId,
         message: payload,
       };
+      
+      if (!isGetInfo && (!authToken || !roomId)) {
+        setError({ message: 'Auth token or Room ID missing for protected command.', type: 'auth' });
+        toast({ title: 'Authentication Error', description: 'Missing token or Room ID.', variant: 'destructive'});
+        setIsSendingCommand(false);
+        return;
+      }
+      
       wsRef.current.send(serializeClientMessage(message));
       if ('set_state' in payload) setIsSendingCommand(true);
     } else {
-      setError({ message: 'TCP connection not open.', type: 'tcp' });
+      setError({ message: 'WebSocket connection not open.', type: 'websocket' });
       setIsSendingCommand(false);
     }
-  }, [authToken, roomId, connectionStatus]);
+  }, [authToken, roomId]);
 
   const handleWebSocketMessage = useCallback((event: MessageEvent) => {
+    if (!(event.data instanceof ArrayBuffer)) {
+        console.error("Received non-ArrayBuffer WebSocket message:", event.data);
+        setError({ message: 'Received invalid data format from WebSocket.', type: 'parse' });
+        setIsSendingCommand(false);
+        return;
+    }
+
     const response = parseControllerResponse(event.data as ArrayBuffer);
     if (!response) {
-      setError({ message: 'Invalid response from controller (TCP)', type: 'tcp' });
+      setError({ message: 'Invalid response from controller.', type: 'parse' });
       setIsSendingCommand(false);
       return;
     }
 
     if ('info' in response.response) {
       setDeviceInfo(response.response.info);
-      toast({ title: 'Controller Info Received (TCP)', description: `IP: ${response.response.info.ip}` });
+      toast({ title: 'Controller Info Received', description: `Connected to controller: ${response.response.info.ble_name || response.response.info.ip}` });
+      // After getting info, if authenticated, get initial state
+      if (authToken && roomId) {
+        sendMessage({ get_state: {} });
+      } else if (!authToken){
+        toast({title: "Authentication Required", description: "Please login or ensure booking is active to control the room.", variant: "default"});
+      }
     } else if ('state' in response.response) {
       setHardwareState(response.response.state);
     } else if ('status' in response.response) {
       if (response.response.status === ProtoStatuses.Ok) {
-        toast({ title: 'Command Success (TCP)', description: 'Controller confirmed action.' });
-        sendTcpMessage({ get_state: {} });
+        toast({ title: 'Command Success', description: 'Controller confirmed action.' });
+        // Refresh state after successful command
+        sendMessage({ get_state: {} });
       } else {
-        const errorMsg = `Controller reported error for room ${roomId}.`;
-        toast({ title: 'Command Error (TCP)', description: errorMsg, variant: 'destructive' });
+        const errorMsg = `Controller reported an error for Room ${roomId}.`;
+        toast({ title: 'Command Error', description: errorMsg, variant: 'destructive' });
         setError({ message: errorMsg, type: 'command' });
       }
     }
     setIsSendingCommand(false);
-  }, [sendTcpMessage, roomId]); 
-  
-  const sendBleMessage = useCallback(async (payload: ProtoClientMessagePayload) => {
-    if (!bleCharacteristicRef.current || connectionStatus !== 'connected_ble') {
-      setError({ message: 'BLE not connected or characteristic unavailable.', type: 'ble' });
-      setIsSendingCommand(false);
-      return;
+  }, [sendMessage, authToken, roomId]); // Added authToken and roomId
+
+  const disconnect = useCallback(() => {
+    if (stateUpdateIntervalRef.current) {
+      clearInterval(stateUpdateIntervalRef.current);
+      stateUpdateIntervalRef.current = null;
     }
-     if (!authToken && !('get_info' in payload)) {
-      setError({ message: 'BLE authentication token missing.', type: 'auth' });
-      setIsSendingCommand(false);
-      return;
+    if (wsRef.current) {
+      wsRef.current.onclose = null; // Prevent onclose handler from triggering reconnect logic
+      wsRef.current.close();
+      wsRef.current = null;
     }
-
-    const message: ProtoClientMessage = {
-      auth_token: ('get_info' in payload) ? null : authToken,
-      room_id: ('get_info' in payload) ? null : roomId,
-      message: payload,
-    };
-    
-    if ('set_state' in payload) setIsSendingCommand(true);
-
-    try {
-      const serializedPayload = serializeClientMessage(message);
-      await bleCharacteristicRef.current.writeValue(serializedPayload);
-      console.log('[ControllerHook] Sent BLE message (simulated):', message);
-
-      setTimeout(() => {
-        let mockResponse: ProtoControllerResponse;
-        if ('get_info' in payload) {
-           mockResponse = { response: { info: { ip: '192.168.1.100', mac: 'FE:E8:C0:D4:57:14', ble_name: 'ROOM_7', token: 'CM6wqJB5blIMvBKQ' } }};
-           setDeviceInfo(mockResponse.response.info);
-        } else if ('get_state' in payload) {
-          const tempVariation = parseInt(roomId.slice(-1), 10) % 3;
-          const s: ProtoStateResponse = { 
-            light_on: tempVariation === 1 ? ProtoLightStates.On : ProtoLightStates.Off,
-            door_lock: tempVariation === 2 ? ProtoDoorLockStates.Open : ProtoDoorLockStates.Close,
-            channel_1: tempVariation === 0 ? ProtoChannelStates.ChannelOn : ProtoChannelStates.ChannelOff,
-            channel_2: tempVariation === 1 ? ProtoChannelStates.ChannelOn : ProtoChannelStates.ChannelOff,
-            temperature: 19 + tempVariation, 
-            humidity: 38 + tempVariation * 2, 
-            pressure: 995 + tempVariation 
-          };
-          mockResponse = { response: { state: s } };
-          setHardwareState(mockResponse.response.state);
-        } else if ('set_state' in payload) {
-          mockResponse = { response: { status: ProtoStatuses.Ok } };
-          toast({ title: `Command Success (BLE Room ${roomId})` });
-          sendBleMessage({ get_state: {} }); 
-        } else {
-          mockResponse = { response: { status: ProtoStatuses.Error }};
-          toast({ title: `Command Error (BLE Room ${roomId})`, variant: 'destructive' });
-        }
-        setIsSendingCommand(false);
-      }, 700);
-
-    } catch (e: any) {
-      console.error(`[ControllerHook] BLE send/receive error for room ${roomId}:`, e);
-      setError({ message: e.message || `BLE communication error for room ${roomId}.`, type: 'ble' });
-      setIsSendingCommand(false);
-    }
-  }, [connectionStatus, deviceInfo, roomId, authToken, hardwareState]);
+    setConnectionStatus('disconnected');
+    setDeviceInfo(null);
+    setHardwareState(initialHardwareState);
+    // setError(null); // Optionally clear error on explicit disconnect
+    console.log(`[ControllerHook] WebSocket Disconnected for room ${roomId}`);
+  }, [roomId]);
 
 
-  const connectTcp = useCallback(() => {
-    if (!authToken && connectionStatus !== 'connecting_tcp' && connectionStatus !== 'connected_tcp') {
-    } else if (!authToken) {
-        setError({ message: 'Authentication token is missing for TCP connection.', type: 'auth' });
-        toast({ title: 'Connection Failed', description: 'Auth token missing.', variant: 'destructive' });
-        setConnectionStatus('error');
+  const connect = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+        console.log("[ControllerHook] WebSocket already connecting or open.");
         return;
     }
     
-    disconnectAll();
-    setConnectionStatus('connecting_tcp');
+    disconnect(); // Ensure any previous connection is cleaned up
+    setConnectionStatus('connecting');
     setError(null);
+    reconnectAttemptsRef.current = 0;
+
+    console.log(`[ControllerHook] Attempting to connect to WebSocket: ${BRIDGE_WEBSOCKET_URL} for room ${roomId}`);
     
-    console.log(`[ControllerHook] Simulating WebSocket connection to shared controller ws://${CONTROLLER_IP}:${CONTROLLER_PORT} for room ${roomId}`);
-    
-    const mockWs = {
-      readyState: WebSocket.CONNECTING,
-      send: (data: string | ArrayBuffer | Blob | ArrayBufferView) => {
-        const clientMsg = JSON.parse(new TextDecoder().decode(data as ArrayBuffer)) as ProtoClientMessage;
-        console.log("[ControllerHook MockWS] send:", clientMsg);
+    try {
+        wsRef.current = new WebSocket(BRIDGE_WEBSOCKET_URL);
+    } catch (e: any) {
+        console.error(`[ControllerHook] WebSocket instantiation error for room ${roomId}:`, e);
+        setError({ message: e.message || 'Failed to create WebSocket.', type: 'websocket' });
+        setConnectionStatus('error');
+        return;
+    }
 
-        if (!('get_info' in clientMsg.message)) {
-          if (!clientMsg.auth_token || !clientMsg.room_id) {
-            console.error("[ControllerHook MockWS] Auth token or room_id missing for protected command.");
-            if (mockWs.onmessage) mockWs.onmessage({ data: serializeClientMessage({ response: { status: ProtoStatuses.Error } } as any) } as MessageEvent);
-            return;
-          }
-          if (clientMsg.room_id !== roomId || !clientMsg.auth_token.includes(roomId) ) { 
-             console.error(`[ControllerHook MockWS] Token/RoomID mismatch. Expected ${roomId}, got ${clientMsg.room_id}. Token: ${clientMsg.auth_token}`);
-             if (mockWs.onmessage) mockWs.onmessage({ data: serializeClientMessage({ response: { status: ProtoStatuses.Error } } as any) } as MessageEvent);
-             return;
-          }
-        }
-
-        setTimeout(() => {
-          let mockResponse: ProtoControllerResponse;
-          if ('get_info' in clientMsg.message) {
-            mockResponse = { response: { info: { ip: '192.168.1.100', mac: 'FE:E8:C0:D4:57:14', ble_name: 'ROOM_7', token: 'CM6wqJB5blIMvBKQ' } }};
-          } else if ('get_state' in clientMsg.message) {
-            const tempVariation = parseInt(clientMsg.room_id?.slice(-1) || "0", 10) % 3;
-            const s: ProtoStateResponse = { 
-                light_on: tempVariation === 0 ? ProtoLightStates.On : ProtoLightStates.Off,
-                door_lock: tempVariation === 1 ? ProtoDoorLockStates.Open : ProtoDoorLockStates.Close,
-                channel_1: tempVariation === 2 ? ProtoChannelStates.ChannelOn : ProtoChannelStates.ChannelOff,
-                channel_2: tempVariation === 0 ? ProtoChannelStates.ChannelOn : ProtoChannelStates.ChannelOff,
-                temperature: 20 + tempVariation, 
-                humidity: 40 + tempVariation * 2, 
-                pressure: 1000 + tempVariation 
-            };
-            mockResponse = { response: { state: s }};
-          } else if ('set_state' in clientMsg.message) {
-            const cmd = (clientMsg.message.set_state as { state: ProtoCommandStates }).state;
-            let newHardwareStateSlice = { ...hardwareState }; 
-             switch (cmd) {
-                case ProtoCommandStates.LightOn: newHardwareStateSlice.light_on = ProtoLightStates.On; break;
-                case ProtoCommandStates.LightOff: newHardwareStateSlice.light_on = ProtoLightStates.Off; break;
-                case ProtoCommandStates.DoorLockOpen: newHardwareStateSlice.door_lock = ProtoDoorLockStates.Open; break;
-                case ProtoCommandStates.DoorLockClose: newHardwareStateSlice.door_lock = ProtoDoorLockStates.Close; break;
-                case ProtoCommandStates.Channel1On: newHardwareStateSlice.channel_1 = ProtoChannelStates.ChannelOn; break;
-                case ProtoCommandStates.Channel1Off: newHardwareStateSlice.channel_1 = ProtoChannelStates.ChannelOff; break;
-                case ProtoCommandStates.Channel2On: newHardwareStateSlice.channel_2 = ProtoChannelStates.ChannelOn; break;
-                case ProtoCommandStates.Channel2Off: newHardwareStateSlice.channel_2 = ProtoChannelStates.ChannelOff; break;
-            }
-            setHardwareState(newHardwareStateSlice); 
-            mockResponse = { response: { status: ProtoStatuses.Ok }};
-          } else {
-            mockResponse = { response: { status: ProtoStatuses.Error }};
-          }
-          console.log("[ControllerHook MockWS] onmessage (simulated):", mockResponse);
-          if (mockWs.onmessage) mockWs.onmessage({ data: serializeClientMessage(mockResponse as any) } as MessageEvent);
-        }, 500 + Math.random() * 500);
-      },
-      close: () => {
-        console.log("[ControllerHook MockWS] close");
-        mockWs.readyState = WebSocket.CLOSED;
-        if (mockWs.onclose) mockWs.onclose({} as CloseEvent);
-      },
-      onopen: null as ((this: WebSocket, ev: Event) => any) | null,
-      onmessage: null as ((this: WebSocket, ev: MessageEvent) => any) | null,
-      onerror: null as ((this: WebSocket, ev: Event) => any) | null,
-      onclose: null as ((this: WebSocket, ev: CloseEvent) => any) | null,
-    } as unknown as WebSocket;
-
-    wsRef.current = mockWs;
+    wsRef.current.binaryType = 'arraybuffer';
 
     wsRef.current.onopen = () => {
-      console.log(`[ControllerHook] WebSocket Connected to shared controller for room ${roomId} (Simulated)`);
-      setConnectionStatus('connected_tcp');
-      toast({ title: 'TCP Connected', description: `Connection to controller established for Room ${roomId}.`});
-      sendTcpMessage({ get_info: {} }); 
-      if(authToken) {
-        setTimeout(() => sendTcpMessage({ get_state: {} }), 200); 
+      console.log(`[ControllerHook] WebSocket Connected to bridge for room ${roomId}`);
+      reconnectAttemptsRef.current = 0; // Reset reconnect attempts on successful connection
+      setConnectionStatus('connected');
+      toast({ title: 'Bridge Connected', description: `Connection to bridge established for Room ${roomId}.`});
+      
+      // Always get_info on connect. Auth for get_state will be checked in onmessage
+      sendMessage({ get_info: {} });
+      
+      if (authToken && roomId) { // Start polling only if authenticated
         if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
         stateUpdateIntervalRef.current = setInterval(() => {
-          sendTcpMessage({ get_state: {} });
-        }, 7000); 
+          sendMessage({ get_state: {} });
+        }, GET_STATE_INTERVAL);
       } else {
-        toast({ title: 'Authentication Required', description: 'Connect then login or book to control the room.', variant: 'default' });
+         // Toast about needing auth is handled in onmessage after get_info
       }
     };
 
     wsRef.current.onmessage = handleWebSocketMessage;
 
     wsRef.current.onerror = (event) => {
-      console.error(`[ControllerHook] WebSocket Error for room ${roomId} (Simulated):`, event);
-      setError({ message: 'TCP connection error. Controller might be offline.', type: 'tcp' });
-      setConnectionStatus('error');
+      console.error(`[ControllerHook] WebSocket Error for room ${roomId}:`, event);
+      const errorMsg = 'WebSocket connection error. Bridge service might be offline or unreachable.';
+      setError({ message: errorMsg, type: 'websocket' });
+      // Don't set to 'error' status immediately, onclose will handle retry/error state
     };
 
-    wsRef.current.onclose = () => {
-      console.log(`[ControllerHook] WebSocket Disconnected for room ${roomId} (Simulated)`);
+    wsRef.current.onclose = (event) => {
+      console.log(`[ControllerHook] WebSocket Connection Closed for room ${roomId}. Code: ${event.code}, Clean: ${event.wasClean}`);
       if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
-      if (connectionStatus !== 'error') {
-          // setConnectionStatus('disconnected');
+      
+      // Only attempt to reconnect if it was not a clean disconnect initiated by our app
+      if (!event.wasClean && connectionStatus !== 'disconnected') { // Check if not explicitly disconnected
+        reconnectAttemptsRef.current++;
+        if (reconnectAttemptsRef.current <= MAX_RECONNECT_ATTEMPTS) {
+          console.log(`[ControllerHook] Attempting to reconnect (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
+          setConnectionStatus('connecting'); // Show as connecting during retry
+          setTimeout(() => {
+            // Check if still in 'connecting' state before retrying, might have been explicitly disconnected
+            if (connectionStatus === 'connecting') connect();
+          }, RECONNECT_DELAY * reconnectAttemptsRef.current); // Exponential backoff could be better
+        } else {
+          console.error(`[ControllerHook] Max reconnect attempts reached for room ${roomId}.`);
+          setError({ message: 'Failed to connect to the bridge after multiple attempts.', type: 'websocket' });
+          setConnectionStatus('error');
+        }
+      } else {
+         // If it was a clean disconnect or explicit disconnect, set to 'disconnected'
+         if (connectionStatus !== 'error') { // Don't override an existing error state with 'disconnected'
+            setConnectionStatus('disconnected');
+         }
       }
     };
-    
-    setTimeout(() => {
-       if (wsRef.current && wsRef.current.onopen && wsRef.current.readyState === WebSocket.CONNECTING) {
-         wsRef.current.readyState = WebSocket.OPEN;
-         (wsRef.current.onopen as Function)({} as Event);
-       }
-    }, 1000);
-
-  }, [roomId, authToken, disconnectAll, handleWebSocketMessage, sendTcpMessage, hardwareState, connectionStatus]);
-
-
-  const connectBle = useCallback(async () => {
-    if (!navigator.bluetooth) {
-      setError({ message: 'Web Bluetooth not supported.', type: 'ble' });
-      setConnectionStatus('error');
-      return;
-    }
-
-    disconnectAll();
-    const sharedBleName = "ROOM_7";
-    setConnectionStatus('connecting_ble');
-    setError(null);
-
-    try {
-      bleDeviceRef.current = await BleService.requestDevice({ filters: [{ name: sharedBleName }] });
-      if (!bleDeviceRef.current) { 
-        setError({ message: 'BLE device not found or selection cancelled.', type: 'ble' });
-        return;
-      }
-
-      const server = await BleService.connectToGattServer(bleDeviceRef.current);
-      const service = await server.getPrimaryService(BLE_SERVICE_UUID);
-      bleCharacteristicRef.current = await service.getCharacteristic(BLE_CHARACTERISTIC_UUID);
-      
-      setConnectionStatus('authenticating_ble');
-      
-      await new Promise(resolve => setTimeout(resolve, 500)); 
-
-      setConnectionStatus('connected_ble');
-      toast({ title: 'BLE Connected', description: `Authenticated with ${sharedBleName} for Room ${roomId}.`});
-
-      sendBleMessage({ get_info: {} }); 
-      if (authToken) {
-        setTimeout(() => sendBleMessage({ get_state: {} }), 200); 
-        if (stateUpdateIntervalRef.current) clearInterval(stateUpdateIntervalRef.current);
-        stateUpdateIntervalRef.current = setInterval(() => {
-          sendBleMessage({ get_state: {} });
-        }, 8000);
-      } else {
-         toast({ title: 'Authentication Required for BLE State', description: 'Connect then login or book to control the room via BLE.', variant: 'default' });
-      }
-
-    } catch (e: any) {
-      console.error(`[ControllerHook] BLE Error for room ${roomId}:`, e);
-      setError({ message: e.message || `BLE connection failed for room ${roomId}.`, type: 'ble' });
-      setConnectionStatus('error');
-    }
-  }, [roomId, authToken, disconnectAll, sendBleMessage]);
-
-
-  const connect = useCallback(() => {
-    connectTcp();
-  }, [connectTcp]);
+  }, [roomId, authToken, disconnect, handleWebSocketMessage, sendMessage, connectionStatus]);
 
 
   useEffect(() => {
+    // Cleanup on component unmount
     return () => {
-      disconnectAll();
-      if (stateUpdateIntervalRef.current) {
-        clearInterval(stateUpdateIntervalRef.current);
-      }
+      disconnect();
     };
-  }, [disconnectAll]);
+  }, [disconnect]);
 
-  const sendCommand = useCallback((commandState: ProtoCommandStates) => {
+  const sendCommandToController = useCallback((commandState: ProtoCommandStates) => {
     if (!authToken) {
       toast({ title: 'Command Failed', description: 'Authentication token is missing.', variant: 'destructive' });
       setError({message: 'Auth token missing for command', type: 'auth'});
       return;
     }
-    setError(null);
-    const payload: ProtoClientMessagePayload = { set_state: { state: commandState } };
-    if (connectionStatus === 'connected_tcp' && wsRef.current) {
-      sendTcpMessage(payload);
-    } else if (connectionStatus === 'connected_ble' && bleCharacteristicRef.current) {
-      sendBleMessage(payload);
-    } else {
-      setError({ message: 'Not connected to controller.', type: 'command' });
-      toast({ title: 'Command Failed', description: 'Not connected to controller.', variant: 'destructive' });
+    if (connectionStatus !== 'connected') {
+      toast({ title: 'Command Failed', description: 'Not connected to controller bridge.', variant: 'destructive' });
+      setError({message: 'Not connected to controller bridge.', type: 'websocket'});
+      return;
     }
-  }, [connectionStatus, sendTcpMessage, sendBleMessage, authToken]);
+    setError(null); // Clear previous errors before sending a new command
+    const payload: ProtoClientMessagePayload = { set_state: { state: commandState } };
+    sendMessage(payload);
+  }, [connectionStatus, sendMessage, authToken]);
 
   return {
     deviceInfo,
@@ -401,14 +260,10 @@ export function useRoomController(roomId: string, authToken: string | null) {
     error,
     isSendingCommand,
     connect,
-    connectBle,
-    disconnect: useCallback(() => { 
-      disconnectAll();
-      setConnectionStatus('disconnected');
-      setDeviceInfo(null);
-      setHardwareState(initialHardwareState);
-      setError(null);
-    }, [disconnectAll]),
-    sendCommand,
+    // connectBle is removed as primary path is WebSocket bridge
+    disconnect,
+    sendCommand: sendCommandToController,
   };
 }
+
+    
